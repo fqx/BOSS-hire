@@ -1,0 +1,10 @@
+{
+    "job_title": "礼品福利销售经理",
+    "job_requirements" : {
+    "age_lower_bound": 25,
+    "age_upper_bound": 35,
+    "cv_required_keywords": ["礼品", "福利", "节日", "工会"],
+    "cv_requirements": "该职位需要面试者有一年或以上时间销售礼品福利的经历。"
+},
+"url" : "https://www.zhipin.com/"
+}
