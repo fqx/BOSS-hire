@@ -30,7 +30,7 @@ This project is an automated resume screening tool that uses OpenAI's GPT models
 
 ## Usage
 
-1. Prepare a configuration file (e.g., `params.json`) 
+1. Prepare a configuration file (e.g., `params.json`)
 
 2. Run the script:
    ```

@@ -51,6 +51,9 @@ def loop_recommend(driver, max_idx, job_requirements, client):
     while idx < max_idx:
         try:
             idx += 1
+            if driver_utils.is_viewed(driver, idx):
+                logging.info(f"#{idx} 已经查看过。")
+                continue
             age = driver_utils.get_age(driver, idx)
             if job_requirements['age_lower_bound'] <= age <= job_requirements['age_upper_bound']:
                 div_resume = driver_utils.find_resume_card(driver, idx)

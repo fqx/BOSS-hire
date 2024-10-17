@@ -18,6 +18,7 @@ logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(mes
 
 # import undetected_chromedriver as uc
 xpath_age = '//*[@id="recommend-list"]/div/ul/li[{}]/div/div[1]/div[2]/div[2]/div'
+xpath_resume_card_is_viewed = '//*[@id="recommend-list"]/div/ul/li[{}]'
 xpath_resume_card = '//*[@id="recommend-list"]/div/ul/li[{}]/div/div[1]'
 xpath_resume_page = '//*[@id="resume-page"]/div/div/div[2]/div[4]'
 xpath_resume_section = '//h3[@class="title"]/following-sibling::div[@class="item-right"]'
@@ -47,6 +48,19 @@ def goto_recommend(driver):
 def find_resume_card(driver, idx):
     div = driver.find_element(By.XPATH, xpath_resume_card.format(idx))
     return div
+
+
+def is_viewed(driver, idx):
+    try:
+        card = driver.find_element(By.XPATH, xpath_resume_card_is_viewed.format(idx))
+        card_inner =card.find_element(By.CSS_SELECTOR, "div[class^='card-inner']")
+        is_viewed = "has-viewed" in card_inner.get_attribute("class")
+        return is_viewed
+    except NoSuchElementException:
+        logging.info(f"#{idx} 加载失败。")
+        scroll_down(driver)
+        time.sleep(1)
+        return False
 
 
 def get_age(driver, idx):
