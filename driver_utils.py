@@ -57,9 +57,9 @@ def is_viewed(driver, idx):
         is_viewed = "has-viewed" in card_inner.get_attribute("class")
         return is_viewed
     except NoSuchElementException:
-        logging.info(f"#{idx} 加载失败。")
+        logging.warning(f"#{idx} 加载失败。")
         scroll_down(driver)
-        time.sleep(1)
+        time.sleep(3)
         return False
 
 

@@ -53,6 +53,7 @@ def loop_recommend(driver, max_idx, job_requirements, client):
             idx += 1
             if driver_utils.is_viewed(driver, idx):
                 logging.info(f"#{idx} 已经查看过。")
+                driver_utils.scroll_down(driver)
                 continue
             age = driver_utils.get_age(driver, idx)
             if job_requirements['age_lower_bound'] <= age <= job_requirements['age_upper_bound']:
@@ -72,7 +73,7 @@ def loop_recommend(driver, max_idx, job_requirements, client):
                     driver_utils.scroll_down(driver)
                     continue
 
-            logging.info('#{} 不符合要求'.format(idx))
+            logging.info('#{} 不符合要求。'.format(idx))
             driver_utils.scroll_down(driver)
 
 
