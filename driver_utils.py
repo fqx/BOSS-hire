@@ -1,12 +1,17 @@
 import time
 
 # from selenium import webdriver
-from selenium.common import NoSuchElementException
+from selenium.common import NoSuchElementException, ElementClickInterceptedException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
 import re
+
+from io import BytesIO
+from PIL import Image
+import base64
 
 import logging, os
 from dotenv import load_dotenv
@@ -32,6 +37,11 @@ def log_in(driver):
     time.sleep(3)
     qr_button = driver.find_element(By.XPATH, '//*[@id="wrap"]/div/div[2]/div[2]/div[1]')
     qr_button.click()
+    # time.sleep(1)
+    # imgdata = base64.b64decode(driver.get_screenshot_as_base64())
+    # img = Image.open(BytesIO(imgdata))
+    # logging.info('请扫描二维码登录。')
+    # img.show()
     wait = WebDriverWait(driver, 30)
     wait.until(EC.url_to_be('https://www.zhipin.com/web/chat/index'))
 
@@ -79,7 +89,9 @@ def get_age(driver, idx):
 
 def get_resume(driver, div):
     time.sleep(3)
-    div.click()
+    # div.click()
+    # ActionChains(driver).move_to_element(div).click().perform()
+    driver.execute_script("arguments[0].click();", div)
     wait = WebDriverWait(driver, 10)
     wait.until(EC.visibility_of_element_located((By.XPATH, xpath_resume_page)))
     # resume_detail = driver.find_element(By.XPATH, xpath_resume_page)
@@ -110,5 +122,5 @@ def close_resume(driver):
 
 
 def scroll_down(driver):
-    time.sleep(1)
+    time.sleep(0.5)
     driver.execute_script("window.scrollTo(0, window.scrollY + 180)")

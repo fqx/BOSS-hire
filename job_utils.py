@@ -1,3 +1,5 @@
+from selenium.common import ElementClickInterceptedException
+
 import driver_utils, llm_utils
 import logging, os
 from dotenv import load_dotenv
@@ -76,7 +78,10 @@ def loop_recommend(driver, max_idx, job_requirements, client):
             logging.info('#{} 不符合要求。'.format(idx))
             driver_utils.scroll_down(driver)
 
-
+        except ElementClickInterceptedException as e:
+            logging.warning(f"An error occurred: {e}")
+            logging.info("Try next one.")
+            continue
 
         except Exception as e:
             logging.warning(f"An error occurred: {e}")
