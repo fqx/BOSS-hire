@@ -50,6 +50,8 @@ def check_if_contains_any_character(a_list, b_string):
 def loop_recommend(driver, max_idx, job_requirements, client):
     driver_utils.goto_recommend(driver)
     idx = 0
+    viewed = 0
+    greetinged = 0
     while idx < max_idx:
         try:
             idx += 1
@@ -64,11 +66,15 @@ def loop_recommend(driver, max_idx, job_requirements, client):
                                                              div_resume.get_attribute('textContent')):
                     # 年龄符合要求，并且含有关键字。调用LLM进一步处理
                     logging.info("#{} 年龄符合要求，并且含有关键字。调用LLM进一步处理。".format(idx))
+
                     resume_text = driver_utils.get_resume(driver, div_resume)
                     is_qualified = llm_utils.is_qualified(client, resume_text, job_requirements['cv_requirements'])
+                    viewed += 1
+
                     if is_qualified:
                         logging.info(f"#{idx} 符合要求，打招呼。")
                         driver_utils.say_hi(driver)
+                        greetinged += 1
                     else:
                         logging.info(f"#{idx} 不符合要求。")
                     driver_utils.close_resume(driver)
@@ -86,3 +92,4 @@ def loop_recommend(driver, max_idx, job_requirements, client):
         except Exception as e:
             logging.warning(f"An error occurred: {e}")
             break
+    logging.info(f"简历查看数：{viewed}   打招呼人数：{greetinged}")
