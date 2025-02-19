@@ -17,7 +17,7 @@ system_message = """你是一位经验丰富的人力资源专家和面试官。
 请确保你的判断是客观、公正的，并基于所提供的信息。"""
 
 prompt_template = """
-        候选人工作经历:
+        候选人简历:
         {}
         
         
@@ -58,7 +58,7 @@ def is_qualified(client, resume_text, resume_requirement):
             presence_penalty=0
         )
         result = response.choices[0].message.parsed
-        logging.info(f"{result.is_qualified} - {resume_text[:50]}")
+        logging.info(f"{result.is_qualified} - {' '.join(resume_text[:50].splitlines())}")
         # if result_text == "1":
         #     return True
         # elif result_text == "0":
