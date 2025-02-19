@@ -25,11 +25,11 @@ logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(mes
 xpath_age = '//*[@id="recommend-list"]/div/ul/li[{}]/div/div[1]/div[2]/div[2]/div'
 xpath_resume_card_is_viewed = '//*[@id="recommend-list"]/div/ul/li[{}]'
 xpath_resume_card = '//*[@id="recommend-list"]/div/ul/li[{}]/div/div[1]'
-xpath_resume_page = '//*[@id="resume-page"]/div/div/div[2]/div[4]'
-xpath_resume_section = '//h3[@class="title"]/following-sibling::div[@class="item-right"]'
-xpath_say_hi = '//*[@id="resume-page"]/div/div/div[3]/div/div[1]/div/div/div[2]/div/span/div/button'
+xpath_resume_page = '//div[@class="resume-detail-wrap"]'
+xpath_resume_section = '//div[starts-with(@class, "resume-section")]'
+xpath_say_hi = '//button[@class="btn-v2 btn-sure-v2 btn-greet"]'
 xpath_i_know_after_say_hi = '//button[contains(text(),"知道了")]'
-xpath_resume_close = '//*[@id="container"]/div/div[2]/div/div/div[2]/div/div[2]/div[1]/h3/div/span'
+xpath_resume_close = '//i[@class="icon-close"]'
 
 
 def log_in(driver):
@@ -51,8 +51,11 @@ def log_in(driver):
 
 def goto_recommend(driver):
     driver.find_element(By.LINK_TEXT, "推荐牛人").click()
-    time.sleep(3)
-    driver.switch_to.frame(0)
+    iframe = WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.NAME, "recommendFrame"))
+    )
+    time.sleep(5)
+    driver.switch_to.frame(iframe)
 
 
 def find_resume_card(driver, idx):
@@ -113,7 +116,10 @@ def say_hi(driver):
     say_hi_botton = driver.find_element(By.XPATH, xpath_say_hi)
     say_hi_botton.click()
     time.sleep(1)
-    driver.find_element(By.XPATH, xpath_i_know_after_say_hi).click()
+    try:
+        driver.find_element(By.XPATH, xpath_i_know_after_say_hi).click()
+    except:
+        pass
 
 
 def close_resume(driver):
