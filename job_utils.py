@@ -48,7 +48,7 @@ def check_if_contains_any_character(a_list, b_string):
 
 
 def loop_recommend(driver, max_idx, job_requirements, client):
-    driver_utils.goto_recommend(driver)
+
     idx = 0
     viewed = 0
     greetinged = 0
@@ -93,3 +93,4 @@ def loop_recommend(driver, max_idx, job_requirements, client):
             logging.warning(f"An error occurred: {e}")
             break
     logging.info(f"简历查看数：{viewed}   打招呼人数：{greetinged}")
+    return viewed, greetinged

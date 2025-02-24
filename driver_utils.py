@@ -130,3 +130,40 @@ def close_resume(driver):
 def scroll_down(driver):
     time.sleep(0.5)
     driver.execute_script("window.scrollTo(0, window.scrollY + 180)")
+
+
+def select_job_position(driver, job_title):
+    """
+    Method to search and select specific job position on BOSS website
+
+    Args:
+        driver: Selenium WebDriver instance
+        job_title: Job title to search and select
+    """
+    try:
+        # Click on the dropdown menu to expand job options
+        dropdown_menu = driver.find_element(By.XPATH, "//div[@class='ui-dropmenu-label']")
+        dropdown_menu.click()
+        time.sleep(1)  # Wait for dropdown to expand
+
+        # Find all job options in the dropdown
+        job_options = driver.find_elements(By.XPATH, "//div[@class='ui-dropmenu-list']/ul/li")
+
+        # Find the first job option that starts with the given job_title
+        selected_job = None
+        for option in job_options:
+            if option.text.startswith(job_title):
+                selected_job = option
+                break
+
+        # If a matching job is found, click on it
+        if selected_job:
+            selected_job.click()
+            logging.info(f"Selected job: {job_title}")
+            time.sleep(5)  # Wait for page to load after selection
+        else:
+            logging.warning(f"No job found starting with: {job_title}")
+
+    except Exception as e:
+        logging.error(f"Error selecting job position: {e}")
+        raise

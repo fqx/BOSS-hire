@@ -30,9 +30,14 @@ def get_params():
     parser.add_argument('-c', dest='config')
     args = parser.parse_args()
     if args.config:
-        return json.load(open(args.config))
+        config = json.load(open(args.config))
+        # If not a list, convert to list for consistent processing
+        return [config] if not isinstance(config, list) else config
     else:
-        return json.load(open("params.json"))
+        config = json.load(open("params.json"))
+        # If not a list, convert to list for consistent processing
+        return [config] if not isinstance(config, list) else config
+
 def launch_webdriver(url):
     driver = uc.Chrome(use_subprocess=True)
     driver.get(url)
@@ -42,17 +47,43 @@ def launch_webdriver(url):
 
 
 if __name__ == '__main__':
-    params = get_params()
-    logging.info(f"开始处理职位：{params['job_title']}")
+    # Get all job configurations
+    job_configs = get_params()
 
-    driver = launch_webdriver(params['url'])
+    # Launch webdriver once
+    driver = launch_webdriver(job_configs[0]['url'])
     driver_utils.log_in(driver)
 
-    job_requirements = job_utils.get_job_requirements(params['job_requirements'])
+    driver_utils.goto_recommend(driver)
 
-    # scan recommend loop
-    job_utils.loop_recommend(driver, 120, job_requirements, client)
+    # 用于存储每个职位的统计信息
+    job_stats = {}
 
-    # scan new niuren loop
+    # Process each job configuration
+    for params in job_configs:
+        job_title = params['job_title']
+        max_idx = params.get('max_idx', 120)
+        logging.info(f"开始处理职位：{job_title}")
 
+        # Select specific job position
+        driver_utils.select_job_position(driver, job_title)
+
+        # Get job requirements
+        job_requirements = job_utils.get_job_requirements(params['job_requirements'])
+
+        # Scan recommend loop for this specific job
+        viewed, greetinged = job_utils.loop_recommend(driver, max_idx, job_requirements, client)
+
+        # 记录每个职位的统计信息
+        job_stats[job_title] = {
+            'viewed': viewed,
+            'greetinged': greetinged
+        }
+
+    # Close driver after processing all jobs
     driver.quit()
+
+  # 最终输出每个职位的状态
+    logging.info("职位处理统计：")
+    for job_title, stats in job_stats.items():
+        logging.info(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greetinged']}")
