@@ -65,6 +65,7 @@ if __name__ == '__main__':
         max_idx = params.get('max_idx', 120)
         logging.info(f"开始处理职位：{job_title}")
 
+
         # Select specific job position
         driver_utils.select_job_position(driver, job_title)
 
@@ -72,12 +73,12 @@ if __name__ == '__main__':
         job_requirements = job_utils.get_job_requirements(params['job_requirements'])
 
         # Scan recommend loop for this specific job
-        viewed, greetinged = job_utils.loop_recommend(driver, max_idx, job_requirements, client)
+        viewed, greeted = job_utils.loop_recommend(driver, max_idx, job_requirements, client)
 
         # 记录每个职位的统计信息
         job_stats[job_title] = {
             'viewed': viewed,
-            'greetinged': greetinged
+            'greeted': greeted
         }
 
     # Close driver after processing all jobs
@@ -86,4 +87,4 @@ if __name__ == '__main__':
   # 最终输出每个职位的状态
     logging.info("职位处理统计：")
     for job_title, stats in job_stats.items():
-        logging.info(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greetinged']}")
+        logging.info(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")

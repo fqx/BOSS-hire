@@ -51,7 +51,7 @@ def loop_recommend(driver, max_idx, job_requirements, client):
 
     idx = 0
     viewed = 0
-    greetinged = 0
+    greeted = 0
     while idx < max_idx:
         try:
             idx += 1
@@ -74,7 +74,7 @@ def loop_recommend(driver, max_idx, job_requirements, client):
                     if is_qualified:
                         logging.info(f"#{idx} 符合要求，打招呼。")
                         driver_utils.say_hi(driver)
-                        greetinged += 1
+                        greeted += 1
                     else:
                         logging.info(f"#{idx} 不符合要求。")
                     driver_utils.close_resume(driver)
@@ -92,5 +92,5 @@ def loop_recommend(driver, max_idx, job_requirements, client):
         except Exception as e:
             logging.warning(f"An error occurred: {e}")
             break
-    logging.info(f"简历查看数：{viewed}   打招呼人数：{greetinged}")
-    return viewed, greetinged
+    logging.info(f"简历查看数：{viewed}   打招呼人数：{greeted}")
+    return viewed, greeted
