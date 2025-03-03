@@ -1,5 +1,5 @@
 import time
-
+from log_utils import logger
 # from selenium import webdriver
 from selenium.common import NoSuchElementException, ElementClickInterceptedException
 from selenium.webdriver.chrome.options import Options
@@ -13,12 +13,9 @@ from io import BytesIO
 from PIL import Image
 import base64
 
-import logging, os
+import os
 from dotenv import load_dotenv
 load_dotenv()
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 # import undetected_chromedriver as uc
@@ -40,12 +37,12 @@ def log_in(driver):
     # time.sleep(1)
     # imgdata = base64.b64decode(driver.get_screenshot_as_base64())
     # img = Image.open(BytesIO(imgdata))
-    # logging.info('请扫描二维码登录。')
+    # logger.info('请扫描二维码登录。')
     # img.show()
     wait = WebDriverWait(driver, 30)
     wait.until(EC.url_to_be('https://www.zhipin.com/web/chat/index'))
 
-    logging.info("Logged in.")
+    logger.info("Logged in.")
     time.sleep(3)
 
 
@@ -70,7 +67,7 @@ def is_viewed(driver, idx):
         is_viewed = "has-viewed" in card_inner.get_attribute("class")
         return is_viewed
     except NoSuchElementException:
-        logging.warning(f"#{idx} 加载失败。")
+        logger.warning(f"#{idx} 加载失败。")
         scroll_down(driver)
         time.sleep(3)
         return False
@@ -82,7 +79,7 @@ def get_age(driver, idx):
             age = driver.find_element(By.XPATH, xpath_age.format(idx)).text
             break
         except:
-            logging.warning('载入更多简历')
+            logger.warning('载入更多简历')
             # driver.execute_script("window.scrollTo(0, window.scrollY + 180)")
             time.sleep(1)
             return 99
@@ -159,11 +156,11 @@ def select_job_position(driver, job_title):
         # If a matching job is found, click on it
         if selected_job:
             selected_job.click()
-            logging.info(f"Selected job: {job_title}")
+            logger.info(f"Selected job: {job_title}")
             time.sleep(5)  # Wait for page to load after selection
         else:
-            logging.warning(f"No job found starting with: {job_title}")
+            logger.warning(f"No job found starting with: {job_title}")
 
     except Exception as e:
-        logging.error(f"Error selecting job position: {e}")
+        logger.error(f"Error selecting job position: {e}")
         raise

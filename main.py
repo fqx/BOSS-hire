@@ -3,17 +3,15 @@ import os, argparse, time, json
 from openai import OpenAI
 
 import undetected_chromedriver as uc
-import driver_utils, llm_utils, job_utils
+import driver_utils, llm_utils, job_utils, log_utils
 
 global driver
 
 from packaging import version
 from dotenv import load_dotenv
-import logging
+
 load_dotenv()
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL')
@@ -63,7 +61,7 @@ if __name__ == '__main__':
     for params in job_configs:
         job_title = params['job_title']
         max_idx = params.get('max_idx', 120)
-        logging.info(f"开始处理职位：{job_title}")
+        log_utils.logger.info(f"开始处理职位：{job_title}")
 
 
         # Select specific job position
@@ -85,6 +83,6 @@ if __name__ == '__main__':
     driver.quit()
 
   # 最终输出每个职位的状态
-    logging.info("职位处理统计：")
+    log_utils.logger.info("职位处理统计：")
     for job_title, stats in job_stats.items():
-        logging.info(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")
+        log_utils.logger.info(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")

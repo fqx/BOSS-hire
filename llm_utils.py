@@ -4,10 +4,11 @@
 from pydantic import BaseModel
 import logging, os
 from dotenv import load_dotenv
+from log_utils import logger
 load_dotenv()
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
+# LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+# logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
 
 system_message = """你是一位经验丰富的人力资源专家和面试官。你的任务是根据给定的职位要求，评估候选人的工作经历是否符合要求。请仔细分析候选人的经历与职位要求之间的匹配度，考虑技能、经验、行业背景等多个方面。在评估后，请给出明确的判断:
 
@@ -58,7 +59,7 @@ def is_qualified(client, resume_text, resume_requirement):
             presence_penalty=0
         )
         result = response.choices[0].message.parsed
-        logging.info(f"{result.is_qualified} - {' '.join(resume_text[:50].splitlines())}")
+        logger.info(f"{result.is_qualified} - {' '.join(resume_text[:50].splitlines())}")
         # if result_text == "1":
         #     return True
         # elif result_text == "0":

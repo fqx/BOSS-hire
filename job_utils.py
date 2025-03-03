@@ -1,12 +1,11 @@
 from selenium.common import ElementClickInterceptedException
-
+from tqdm import tqdm
 import driver_utils, llm_utils
-import logging, os
+import os
+from log_utils import logger
 from dotenv import load_dotenv
 load_dotenv()
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
 
 default_job_requirements = {
         'age_lower_bound': 0,
@@ -48,49 +47,68 @@ def check_if_contains_any_character(a_list, b_string):
 
 
 def loop_recommend(driver, max_idx, job_requirements, client):
-
     idx = 0
     viewed = 0
     greeted = 0
-    while idx < max_idx:
-        try:
-            idx += 1
-            if driver_utils.is_viewed(driver, idx):
-                logging.info(f"#{idx} 已经查看过。")
-                driver_utils.scroll_down(driver)
-                continue
-            age = driver_utils.get_age(driver, idx)
-            if job_requirements['age_lower_bound'] <= age <= job_requirements['age_upper_bound']:
-                div_resume = driver_utils.find_resume_card(driver, idx)
-                if check_if_contains_any_character(job_requirements['cv_required_keywords'],
-                                                             div_resume.get_attribute('textContent')):
-                    # 年龄符合要求，并且含有关键字。调用LLM进一步处理
-                    logging.info("#{} 年龄符合要求，并且含有关键字。调用LLM进一步处理。".format(idx))
 
-                    resume_text = driver_utils.get_resume(driver, div_resume)
-                    is_qualified = llm_utils.is_qualified(client, resume_text, job_requirements['cv_requirements'])
-                    viewed += 1
+    # 获取日志处理器并设置当前tqdm实例
+    log_handler = logger.handlers[0]
 
-                    if is_qualified:
-                        logging.info(f"#{idx} 符合要求，打招呼。")
-                        driver_utils.say_hi(driver)
-                        greeted += 1
-                    else:
-                        logging.info(f"#{idx} 不符合要求。")
-                    driver_utils.close_resume(driver)
+    # Wrap the main loop with tqdm
+    with tqdm(total=max_idx, desc="Processing Resumes", unit="resume",
+              leave=True) as pbar:
+        # 将当前进度条实例传递给日志处理器
+        log_handler.set_tqdm(pbar)
+
+        while idx < max_idx:
+            try:
+                idx += 1
+                if driver_utils.is_viewed(driver, idx):
+                    logger.info(f"#{idx} 已经查看过。")
                     driver_utils.scroll_down(driver)
+                    pbar.update(1)
+                    # pbar.refresh()
                     continue
 
-            logging.info('#{} 不符合要求。'.format(idx))
-            driver_utils.scroll_down(driver)
+                age = driver_utils.get_age(driver, idx)
+                if job_requirements['age_lower_bound'] <= age <= job_requirements['age_upper_bound']:
+                    div_resume = driver_utils.find_resume_card(driver, idx)
+                    if check_if_contains_any_character(job_requirements['cv_required_keywords'],
+                                                       div_resume.get_attribute('textContent')):
+                        logger.info("#{} 年龄符合要求，并且含有关键字。调用LLM进一步处理。".format(idx))
 
-        except ElementClickInterceptedException as e:
-            logging.warning(f"An error occurred: {e}")
-            logging.info("Try next one.")
-            continue
+                        resume_text = driver_utils.get_resume(driver, div_resume)
+                        is_qualified = llm_utils.is_qualified(client, resume_text, job_requirements['cv_requirements'])
+                        viewed += 1
 
-        except Exception as e:
-            logging.warning(f"An error occurred: {e}")
-            break
-    logging.info(f"简历查看数：{viewed}   打招呼人数：{greeted}")
+                        if is_qualified:
+                            logger.info(f"#{idx} 符合要求，打招呼。")
+                            driver_utils.say_hi(driver)
+                            greeted += 1
+                        else:
+                            logger.info(f"#{idx} 不符合要求。")
+                        driver_utils.close_resume(driver)
+                        driver_utils.scroll_down(driver)
+                        pbar.update(1)
+                        # pbar.refresh()
+                        continue
+
+                logger.info('#{} 不符合要求。'.format(idx))
+                driver_utils.scroll_down(driver)
+                pbar.update(1)
+                # pbar.refresh()
+
+            except ElementClickInterceptedException as e:
+                logger.warning(f"An error occurred: {e}")
+                logger.info("Try next one.")
+                pbar.update(1)
+                # pbar.refresh()
+                continue
+
+            except Exception as e:
+                logger.warning(f"An error occurred: {e}")
+                break
+
+    log_handler.set_tqdm(None)
+    logger.info(f"简历查看数：{viewed}   打招呼人数：{greeted}")
     return viewed, greeted
