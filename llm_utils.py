@@ -2,6 +2,7 @@
 # from langchain.prompts import PromptTemplate
 # from langchain.embeddings import OpenAIEmbeddings
 from pydantic import BaseModel
+from requests.exceptions import Timeout
 import logging, os
 from dotenv import load_dotenv
 from log_utils import logger
@@ -33,38 +34,40 @@ prompt_template = """
 class interviewer(BaseModel):
     is_qualified: bool
 
+
 def is_qualified(client, resume_text, resume_requirement):
     if resume_requirement:
-        response = client.beta.chat.completions.parse(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_message
-                },
-                {
-                    "role": "user",
-                    "content": prompt_template.format(resume_text, resume_requirement)
-                },
-                {
-                    "role": "assistant",
-                    "content": "0"
-                }
-            ],
-            temperature=0.2,
-            max_tokens=500,
-            response_format = interviewer,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0
-        )
-        result = response.choices[0].message.parsed
-        logger.info(f"{result.is_qualified} - {' '.join(resume_text[:50].splitlines())}")
-        # if result_text == "1":
-        #     return True
-        # elif result_text == "0":
-        #     return False
-        # else:
-        #     print(f"OPENAI 回复为：{result_text}")
-        #     return False
-        return result.is_qualified
+        try:
+            response = client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_message
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt_template.format(resume_text, resume_requirement)
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "0"
+                    }
+                ],
+                temperature=0.2,
+                max_tokens=500,
+                response_format = interviewer,
+                top_p=1,
+                frequency_penalty=0,
+                presence_penalty=0,
+                timeout=2.0  # 设置超时
+            )
+            result = response.choices[0].message.parsed
+            logger.info(f"{result.is_qualified} - {' '.join(resume_text[:50].splitlines())}")
+            return result.is_qualified
+        except Timeout:
+            logger.warning("OpenAI API request timed out")
+            return False
+        except Exception as e:
+            logger.error(f"Error in OpenAI API request: {e}")
+            return False
