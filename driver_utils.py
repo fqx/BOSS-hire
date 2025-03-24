@@ -24,7 +24,7 @@ xpath_resume_card_is_viewed = '//*[@id="recommend-list"]/div/ul/li[{}]'
 xpath_resume_card = '//*[@id="recommend-list"]/div/ul/li[{}]/div/div[1]'
 xpath_resume_page = '//div[@class="resume-detail-wrap"]'
 xpath_resume_section = '//div[starts-with(@class, "resume-section")]'
-xpath_say_hi = '//button[@class="btn-v2 btn-sure-v2 btn-greet"]'
+xpath_say_hi = '//button[starts-with(@class, "btn-v2 btn-sure-v2 btn-greet")]'
 xpath_i_know_after_say_hi = '//button[contains(text(),"知道了")]'
 xpath_resume_close = '//i[@class="icon-close"]'
 
