@@ -18,28 +18,17 @@ system_message = """你是一位经验丰富的人力资源专家和面试官。
 
 请确保你的判断是客观、公正的，并基于所提供的信息。"""
 
-prompt_template = """
-        候选人简历:
-        {}
-        
-        
-        职位要求:
-        {} 
-        
-        
-        请根据以上信息，评估该候选人是否符合这个职位的要求。记住，你的回答应该只是True或False。
-    """
-
 
 class interviewer(BaseModel):
     is_qualified: bool
+    reason: str
 
 
-def is_qualified(client, resume_text, resume_requirement):
+def is_qualified(client, resume_image_base64, resume_requirement):
     if resume_requirement:
         try:
             response = client.beta.chat.completions.parse(
-                model="gpt-4o-mini",
+                model="gpt-4.1-mini",
                 messages=[
                     {
                         "role": "system",
@@ -47,11 +36,18 @@ def is_qualified(client, resume_text, resume_requirement):
                     },
                     {
                         "role": "user",
-                        "content": prompt_template.format(resume_text, resume_requirement)
-                    },
-                    {
-                        "role": "assistant",
-                        "content": "0"
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"职位要求:\n{resume_requirement}\n\n请根据以上职位要求和下面的简历图片，评估该候选人是否符合这个职位的要求，并简要说明原因。"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{resume_image_base64}"
+                                }
+                            }
+                        ]
                     }
                 ],
                 temperature=0.2,
@@ -60,10 +56,10 @@ def is_qualified(client, resume_text, resume_requirement):
                 top_p=1,
                 frequency_penalty=0,
                 presence_penalty=0,
-                timeout=2.0  # 设置超时
+                timeout=10.0  # 设置超时
             )
             result = response.choices[0].message.parsed
-            logger.info(f"{result.is_qualified} - {' '.join(resume_text[:50].splitlines())}")
+            logger.info(f"{result.is_qualified} - {result.reason:50}")
             return result.is_qualified
         except Timeout:
             logger.warning("OpenAI API request timed out")

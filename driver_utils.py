@@ -32,8 +32,11 @@ xpath_resume_close = '//i[@class="icon-close"]'
 def log_in(driver):
     driver.get('https://www.zhipin.com/web/user/?intent=1')
     time.sleep(3)
-    qr_button = driver.find_element(By.XPATH, '//*[@id="wrap"]/div/div[2]/div[2]/div[1]')
-    qr_button.click()
+    try:
+        qr_button = driver.find_element(By.XPATH, '//*[@id="wrap"]/div/div[2]/div[2]/div[1]')
+        qr_button.click()
+    except NoSuchElementException:
+        logger.warning("Maybe we have logged in?")
     # time.sleep(1)
     # imgdata = base64.b64decode(driver.get_screenshot_as_base64())
     # img = Image.open(BytesIO(imgdata))
@@ -88,24 +91,43 @@ def get_age(driver, idx):
 
 
 def get_resume(driver, div):
-    time.sleep(3)
+    time.sleep(1)
+
     # div.click()
     # ActionChains(driver).move_to_element(div).click().perform()
     driver.execute_script("arguments[0].click();", div)
     wait = WebDriverWait(driver, 10)
     wait.until(EC.visibility_of_element_located((By.XPATH, xpath_resume_page)))
     # resume_detail = driver.find_element(By.XPATH, xpath_resume_page)
-    resume_text = []
-    elements = driver.find_elements(By.XPATH, xpath_resume_section)
-    for element in elements:
-        text = element.get_attribute('textContent').strip()  # Remove leading/trailing whitespace
-        if text:  # Only add non-empty strings
-            resume_text.append(text)
 
-    resume_text = " ■ ".join(resume_text)  # Join with a custom separator
-    # resume_text =  resume_detail.get_attribute('textContent').strip()
-    resume_text = re.sub('\\n\s+','',resume_text)
-    return resume_text
+    # resume_text = []
+    # elements = driver.find_elements(By.XPATH, xpath_resume_section)
+    # for element in elements:
+    #     text = element.get_attribute('textContent').strip()  # Remove leading/trailing whitespace
+    #     if text:  # Only add non-empty strings
+    #         resume_text.append(text)
+    #
+    # resume_text = " ■ ".join(resume_text)  # Join with a custom separator
+    # # resume_text =  resume_detail.get_attribute('textContent').strip()
+    # resume_text = re.sub('\\n\s+','',resume_text)
+
+    iframe = driver.find_element(By.TAG_NAME, "iframe")
+    driver.switch_to.frame(iframe)
+
+    canvas_base64 = driver.execute_script("""
+        var canvas = document.querySelector('canvas#resume');
+        if (!canvas) {
+            throw new Error('Canvas not found');
+        }
+
+        console.log('Canvas dimensions:', canvas.width, 'x', canvas.height);
+
+        // 直接从Canvas获取完整图像数据
+        return canvas.toDataURL('image/png').substring(22);
+    """)
+    driver.switch_to.parent_frame()
+
+    return canvas_base64
 
 
 def say_hi(driver):

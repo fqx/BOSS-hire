@@ -3,6 +3,7 @@ import os, argparse, time, json
 from openai import OpenAI
 
 import undetected_chromedriver as uc
+# from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 import driver_utils, llm_utils, job_utils, log_utils
 
 global driver
@@ -37,7 +38,22 @@ def get_params():
         return [config] if not isinstance(config, list) else config
 
 def launch_webdriver(url):
-    driver = uc.Chrome(use_subprocess=True)
+
+    options = uc.ChromeOptions()
+
+    # 禁用Web安全性以允许跨域Canvas操作
+    options.add_argument('--disable-web-security')
+    options.add_argument('--disable-features=VizDisplayCompositor')
+    options.add_argument('--allow-running-insecure-content')
+    options.add_argument('--disable-extensions')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--enable-network-service-logging')
+
+    # 允许跨域访问
+    options.add_argument('--user-data-dir=/tmp/chrome_dev_test')
+    options.add_argument('--allow-cross-origin-auth-prompt')
+    driver = uc.Chrome(use_subprocess=True, options=options)
     driver.get(url)
     # driver.maximize_window()
     time.sleep(2)

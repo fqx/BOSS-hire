@@ -77,8 +77,8 @@ def loop_recommend(driver, max_idx, job_requirements, client):
                                                        div_resume.get_attribute('textContent')):
                         logger.info("#{} 年龄符合要求，并且含有关键字。调用LLM进一步处理。".format(idx))
 
-                        resume_text = driver_utils.get_resume(driver, div_resume)
-                        is_qualified = llm_utils.is_qualified(client, resume_text, job_requirements['cv_requirements'])
+                        resume_image_base64 = driver_utils.get_resume(driver, div_resume)
+                        is_qualified = llm_utils.is_qualified(client, resume_image_base64, job_requirements['cv_requirements'])
                         viewed += 1
 
                         if is_qualified:
