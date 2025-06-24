@@ -32,8 +32,14 @@ logger.setLevel(LOG_LEVEL)
 for handler in logger.handlers[:]:
     logger.removeHandler(handler)
 
-# 添加自定义的TqdmLoggingHandler
-handler = TqdmLoggingHandler()
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+# 添加自定义的TqdmLoggingHandler用于控制台输出
+tqdm_handler = TqdmLoggingHandler()
+console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+tqdm_handler.setFormatter(console_formatter)
+logger.addHandler(tqdm_handler)
+
+# 添加FileHandler用于文件输出
+file_handler = logging.FileHandler('boss_hire.log', encoding='utf-8')
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(file_formatter)
+logger.addHandler(file_handler)

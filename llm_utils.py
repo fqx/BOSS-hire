@@ -39,7 +39,7 @@ def is_qualified(client, resume_image_base64, resume_requirement):
                         "content": [
                             {
                                 "type": "text",
-                                "text": f"职位要求:\n{resume_requirement}\n\n请根据以上职位要求和下面的简历图片，评估该候选人是否符合这个职位的要求，并简要说明原因。"
+                                "text": f"职位要求:\n{resume_requirement}\n\n请根据以上职位要求和下面的简历图片，评估该候选人是否符合这个职位的要求，并简要说明原因。原因要以“候选人张三”(将张三替换为候选人姓名）开头。"
                             },
                             {
                                 "type": "image_url",
