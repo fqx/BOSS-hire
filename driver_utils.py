@@ -97,7 +97,7 @@ def get_resume(driver, div):
     # ActionChains(driver).move_to_element(div).click().perform()
     driver.execute_script("arguments[0].click();", div)
     wait = WebDriverWait(driver, 10)
-    wait.until(EC.visibility_of_element_located((By.XPATH, xpath_resume_page)))
+    wait.until(EC.visibility_of_element_located((By.XPATH, "//canvas[@id='resume']")))
     # resume_detail = driver.find_element(By.XPATH, xpath_resume_page)
 
     # resume_text = []
@@ -131,7 +131,7 @@ def get_resume(driver, div):
 
 
 def say_hi(driver):
-    time.sleep(2)
+    time.sleep(1)
     say_hi_botton = driver.find_element(By.XPATH, xpath_say_hi)
     say_hi_botton.click()
     time.sleep(1)
@@ -142,7 +142,7 @@ def say_hi(driver):
 
 
 def close_resume(driver):
-    time.sleep(2)
+    time.sleep(1)
     driver.find_element(By.XPATH, xpath_resume_close).click()
 
 
