@@ -8,7 +8,7 @@ import driver_utils, llm_utils, job_utils, log_utils
 
 global driver
 
-from packaging import version
+# from packaging import version
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -49,6 +49,8 @@ def launch_webdriver(url):
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--enable-network-service-logging')
+    options.add_argument("--timeout=30")
+    options.add_argument("--read-timeout=30")
 
     # 允许跨域访问
     options.add_argument('--user-data-dir=/tmp/chrome_dev_test')

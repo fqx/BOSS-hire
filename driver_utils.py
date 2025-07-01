@@ -97,7 +97,8 @@ def get_resume(driver, div):
     # ActionChains(driver).move_to_element(div).click().perform()
     driver.execute_script("arguments[0].click();", div)
     wait = WebDriverWait(driver, 10)
-    wait.until(EC.visibility_of_element_located((By.XPATH, "//canvas[@id='resume']")))
+    iframe_locator = (By.CSS_SELECTOR, "iframe[src*='/web/frame/c-resume/']")
+    wait.until(EC.frame_to_be_available_and_switch_to_it(iframe_locator))
     # resume_detail = driver.find_element(By.XPATH, xpath_resume_page)
 
     # resume_text = []
@@ -111,8 +112,9 @@ def get_resume(driver, div):
     # # resume_text =  resume_detail.get_attribute('textContent').strip()
     # resume_text = re.sub('\\n\s+','',resume_text)
 
-    iframe = driver.find_element(By.TAG_NAME, "iframe")
-    driver.switch_to.frame(iframe)
+    # iframe = driver.find_element(By.TAG_NAME, "iframe")
+    # driver.switch_to.frame(iframe)
+    wait.until(EC.visibility_of_element_located((By.XPATH, "//canvas[@id='resume']")))
 
     canvas_base64 = driver.execute_script("""
         var canvas = document.querySelector('canvas#resume');
