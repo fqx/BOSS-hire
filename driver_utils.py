@@ -8,6 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
 import re
+from random import gauss
 
 from io import BytesIO
 from PIL import Image
@@ -91,7 +92,7 @@ def get_age(driver, idx):
 
 
 def get_resume(driver, div):
-    time.sleep(1)
+    time.sleep(max(2 + gauss(0, 1), 1))
 
     # div.click()
     # ActionChains(driver).move_to_element(div).click().perform()
