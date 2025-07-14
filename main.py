@@ -1,4 +1,4 @@
-import os, argparse, time, json
+import os, argparse, time, json, atexit
 
 from openai import OpenAI
 
@@ -22,6 +22,16 @@ if OPENAI_BASE_URL:
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 else:
     client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# Global variable to store job statistics
+job_stats = {}
+
+def log_final_stats():
+    """Function to log final statistics when program exits"""
+    log_utils.logger.info("职位处理统计：")
+    for job_title, stats in job_stats.items():
+        log_utils.logger.info(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")
 
 
 def get_params():
@@ -63,6 +73,9 @@ def launch_webdriver(url):
 
 
 if __name__ == '__main__':
+    # Register the exit handler
+    atexit.register(log_final_stats)
+
     # Get all job configurations
     job_configs = get_params()
 
@@ -72,8 +85,6 @@ if __name__ == '__main__':
 
     driver_utils.goto_recommend(driver)
 
-    # 用于存储每个职位的统计信息
-    job_stats = {}
 
     # Process each job configuration
     for params in job_configs:
@@ -99,8 +110,3 @@ if __name__ == '__main__':
 
     # Close driver after processing all jobs
     driver.quit()
-
-  # 最终输出每个职位的状态
-    log_utils.logger.info("职位处理统计：")
-    for job_title, stats in job_stats.items():
-        log_utils.logger.info(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")
