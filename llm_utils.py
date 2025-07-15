@@ -59,7 +59,7 @@ def is_qualified(client, resume_image_base64, resume_requirement):
                 timeout=10.0  # 设置超时
             )
             result = response.choices[0].message.parsed
-            logger.info(f"{result.is_qualified} - {result.reason:50}")
+            logger.llm(f"{result.is_qualified} - {result.reason:50}")
             return result.is_qualified
         except Timeout:
             logger.warning("OpenAI API request timed out")

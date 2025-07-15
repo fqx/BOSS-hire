@@ -29,9 +29,9 @@ job_stats = {}
 
 def log_final_stats():
     """Function to log final statistics when program exits"""
-    log_utils.logger.info("职位处理统计：")
+    log_utils.logger.llm("职位处理统计：")
     for job_title, stats in job_stats.items():
-        log_utils.logger.info(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")
+        log_utils.logger.llm(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")
 
 
 def get_params():
