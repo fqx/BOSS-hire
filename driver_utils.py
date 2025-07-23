@@ -189,3 +189,11 @@ def select_job_position(driver, job_title):
     except Exception as e:
         logger.error(f"Error selecting job position: {e}")
         raise
+
+
+def close_popover(driver):
+    try:
+        close_button = driver.find_element(By.CLASS_NAME, "iboss-close")
+        close_button.click()
+    except:
+        pass  # Element doesn't exist, do nothing

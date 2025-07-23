@@ -92,6 +92,8 @@ if __name__ == '__main__':
         max_idx = params.get('max_idx', 120)
         log_utils.logger.info(f"开始处理职位：{job_title}")
 
+        # close popover
+        driver_utils.close_popover(driver)
 
         # Select specific job position
         driver_utils.select_job_position(driver, job_title)
