@@ -192,8 +192,30 @@ def select_job_position(driver, job_title):
 
 
 def close_popover(driver):
-    try:
-        close_button = driver.find_element(By.CLASS_NAME, "iboss-close")
-        close_button.click()
-    except:
-        pass  # Element doesn't exist, do nothing
+    while True:
+        try:
+            close_button = driver.find_element(By.CLASS_NAME, "iboss-close")
+            close_button.click()
+        except:
+            break  # No more close buttons found, exit the loop
+
+
+def highlight_element(driver, element, color="red", border_width=3):
+    """Highlights an element by adding a colored border"""
+    # Store original style
+    original_style = element.get_attribute("style")
+
+    # Add highlight style
+    driver.execute_script(
+        f"arguments[0].style.border = '{border_width}px solid {color}';",
+        element
+    )
+
+    # Wait to see the highlight
+    time.sleep(2)
+
+    # Restore original style
+    driver.execute_script(
+        f"arguments[0].setAttribute('style', '{original_style}');",
+        element
+    )

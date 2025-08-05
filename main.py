@@ -82,7 +82,7 @@ if __name__ == '__main__':
     # Launch webdriver once
     driver = launch_webdriver(job_configs[0]['url'])
     driver_utils.log_in(driver)
-
+    driver_utils.close_popover(driver)
     driver_utils.goto_recommend(driver)
 
 
