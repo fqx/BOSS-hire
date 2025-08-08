@@ -1,5 +1,5 @@
-import os, argparse, time, json, atexit
-
+import os, argparse, time, atexit
+import commentjson as json
 from openai import OpenAI
 
 import undetected_chromedriver as uc
@@ -102,7 +102,7 @@ if __name__ == '__main__':
         job_requirements = job_utils.get_job_requirements(params['job_requirements'])
 
         # Scan recommend loop for this specific job
-        viewed, greeted = job_utils.loop_recommend(driver, max_idx, job_requirements, client)
+        viewed, greeted = job_utils.loop_recommend(driver, max_idx, job_requirements, client, job_stats, job_title)
 
         # 记录每个职位的统计信息
         job_stats[job_title] = {

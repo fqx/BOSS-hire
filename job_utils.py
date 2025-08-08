@@ -46,16 +46,22 @@ def check_if_contains_any_character(a_list, b_string):
   return False
 
 
-def loop_recommend(driver, max_idx, job_requirements, client):
+def loop_recommend(driver, max_idx, job_requirements, client, job_stats, job_title):
     idx = 0
     viewed = 0
     greeted = 0
+    def update_job_stats(job_title, viewed = 0, greeted = 0):
+        job_stats[job_title] = {
+            'viewed': viewed,
+            'greeted': greeted
+        }
+    update_job_stats(job_title, viewed, greeted)
 
     # 获取日志处理器并设置当前tqdm实例
     log_handler = logger.handlers[0]
 
     # Wrap the main loop with tqdm
-    with tqdm(total=max_idx, desc="Processing Resumes", unit="resume",
+    with tqdm(total=max_idx, desc=f"Processing Resumes for {job_title}", unit="resume",
               leave=True) as pbar:
         # 将当前进度条实例传递给日志处理器
         log_handler.set_tqdm(pbar)
@@ -80,11 +86,13 @@ def loop_recommend(driver, max_idx, job_requirements, client):
                         resume_image_base64 = driver_utils.get_resume(driver, div_resume)
                         is_qualified = llm_utils.is_qualified(client, resume_image_base64, job_requirements['cv_requirements'])
                         viewed += 1
+                        update_job_stats(job_title, viewed, greeted)
 
                         if is_qualified:
                             logger.info(f"#{idx} 符合要求，打招呼。")
                             driver_utils.say_hi(driver)
                             greeted += 1
+                            update_job_stats(job_title, viewed, greeted)
                         else:
                             logger.info(f"#{idx} 不符合要求。")
                         driver_utils.close_resume(driver)
