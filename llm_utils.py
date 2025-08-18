@@ -19,28 +19,37 @@ system_message = """你是一位经验丰富的人力资源专家和面试官。
 视为必须：包含“需要/必须/硬性/要求/至少/不低于/限定/仅限/必备”等字样，或明确量化限制（学历/年限/证书/技能/行业/地域/在岗状态/到岗时间等）。
 视为非必须：包含“优先/加分/最好/希望/熟悉/了解/优先考虑/可选/不限”等字样。
 若职位写“不限”则该项不构成限制。
+若候选人简历顶部显示的在岗状态与最后一份工作期间的状态不一致，以顶部显示的在岗状态为准。
 
 薪酬硬性规则
 候选人期望的最低薪酬 ≤ 职位“最低薪酬”的1.5倍。
 候选人最低薪酬：其期望区间下限；若为单值则取该值；“面议/保密/未填”视为未知。
 职位最低薪酬：职位给出的薪资下限/起薪/最低值；若未提供则视为未知。
-薪酬任一侧未知，视为该项不满足，判定为 False。
 
-禁止事项
-不做任何协商、放宽、潜力/可培养度评估、替代性解释、行业通融。
-不给多方案/条件式答案（如“若…则…”）。
+输出一致性与生成顺序（必须遵守）：
+1) 先依据本任务规则得到最终结论（先判薪酬硬性规则，再逐条判定“必须条件”；任一不满足即为不通过）。
+2) 按该结论先写 reason 的第一句，固定句式二选一：
+   - 若通过：以“候选人{姓名}符合该职位”开头，然后简述理由；
+   - 若不通过：以“候选人{姓名}不符合该职位”开头，然后点明其首个未满足的“必须条件”。
+3) 再设置 is_qualified，使其与 reason 第一句完全一致：
+   - 若第一句以“符合该职位”开头 => is_qualified = True；
+   - 若第一句以“不符合该职位”开头 => is_qualified = False。
 
-在评估后，请给出明确的判断:
+reason 写作规范（必须遵守）：
+- 第一句只给出最终结论，不得包含“但是/然而/不过”等转折词，也不得出现“如果…则…”等条件式或模糊表述。
+- 若不通过，第二句起必须点明首个未满足的“必须条件”或“薪酬硬性规则”及简短证据（来自JD或简历）。
+- 若无法识别姓名，用“候选人”代替。
 
- - 如果候选人符合职位要求，请回复True
- - 如果候选人不符合职位要求，请回复False
-
-请确保你的判断是客观、公正的，并**严格**基于所提供的信息。若候选人有**任意一项**未满足职位要求的**必须条件**，你应该回复False。"""
+冲突处理与自检（必须执行）：
+- 返回前自检：若 is_qualified 与 reason 第一句不一致，必须以 reason 第一句为准，重设 is_qualified。
+- 任一侧薪酬信息未知时，按规则视为不满足：reason 第一句应为“不符合该职位”，并设 is_qualified = False。
+- 禁止提出协商、放宽或多方案答案。
+"""
 
 
 class interviewer(BaseModel):
-    is_qualified: bool
     reason: str
+    is_qualified: bool
 
 
 def is_qualified(client, resume_image_base64, resume_requirement):
@@ -58,8 +67,7 @@ def is_qualified(client, resume_image_base64, resume_requirement):
                         "content": [
                             {
                                 "type": "text",
-                                "text": f"职位要求:\n{resume_requirement}\n\n请根据以上职位要求和下面的简历图片，\
-                                评估该候选人是否符合这个职位的要求，并简要说明原因。原因要以“候选人张三”(将张三替换为候选人姓名）开头。"
+                                "text": f"职位要求:\n{resume_requirement}\n\n"
                             },
                             {
                                 "type": "image_url",
@@ -72,7 +80,7 @@ def is_qualified(client, resume_image_base64, resume_requirement):
                 ],
                 # temperature=0.2,
                 reasoning_effort="minimal",
-                max_tokens=500,
+                max_tokens=800,
                 response_format = interviewer,
                 top_p=1,
                 frequency_penalty=0,
