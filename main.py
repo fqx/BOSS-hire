@@ -17,11 +17,11 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL')
 
-# Initialize OpenAI client
+# Initialize OpenAI client with timeout
 if OPENAI_BASE_URL:
-    client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+    client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL, timeout=30.0)
 else:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0)
 
 
 # Global variable to store job statistics
@@ -66,6 +66,7 @@ def launch_webdriver(url):
     options.add_argument('--user-data-dir=/tmp/chrome_dev_test')
     options.add_argument('--allow-cross-origin-auth-prompt')
     driver = uc.Chrome(use_subprocess=True, options=options)
+    driver.set_page_load_timeout(30)  # Set page load timeout to 30 seconds
     driver.get(url)
     # driver.maximize_window()
     time.sleep(2)
