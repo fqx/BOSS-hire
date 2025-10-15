@@ -19,9 +19,9 @@ OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL')
 
 # Initialize OpenAI client with timeout
 if OPENAI_BASE_URL:
-    client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL, timeout=30.0)
+    client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL, timeout=60.0)
 else:
-    client = OpenAI(api_key=OPENAI_API_KEY, timeout=30.0)
+    client = OpenAI(api_key=OPENAI_API_KEY, timeout=60.0)
 
 
 # Global variable to store job statistics

@@ -20,6 +20,7 @@ system_message = """你是一位经验丰富的人力资源专家和面试官。
 视为非必须：包含“优先/加分/最好/希望/熟悉/了解/优先考虑/可选/不限”等字样。
 若职位写“不限”则该项不构成限制。
 若候选人简历顶部显示的在岗状态与最后一份工作期间的状态不一致，以顶部显示的在岗状态为准。
+候选人简历顶部显示的“在线”、“刚刚活跃”、“x日内活跃”为其求职账号的活跃状态 ，不应视为其在职状态。
 
 薪酬硬性规则
 候选人期望的最低薪酬 ≤ 职位“最低薪酬”的1.5倍。
@@ -79,13 +80,13 @@ def is_qualified(client, resume_image_base64, resume_requirement):
                     }
                 ],
                 # temperature=0.2,
-                reasoning_effort="minimal",
+                reasoning_effort="low",
                 max_tokens=800,
                 response_format = interviewer,
                 top_p=1,
                 frequency_penalty=0,
                 presence_penalty=0,
-                timeout=10.0  # 设置超时
+                timeout=60.0  # 设置超时
             )
             result = response.choices[0].message.parsed
             logger.llm(f"{result.is_qualified} - {result.reason:50}")
