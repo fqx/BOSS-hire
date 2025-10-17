@@ -5,6 +5,9 @@
     "job_requirements": {
       "age_lower_bound": 25,
       "age_upper_bound": 35,
+      "maximum_salary": 6000,
+      "education": 0,
+      "off_the_job": 1,
       "cv_required_keywords": [
         "礼品",
         "福利",
