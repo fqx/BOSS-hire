@@ -33,7 +33,7 @@ This is the first and most critical gate.
     - If not provided, the value is "Unknown".
 - **Apply the Rule:** The candidate is **disqualified** if `Candidate's Minimum Salary > (Job's Minimum Salary * 1.5)`.
     - **Example:** If the job is 10k-15k, the minimum is 10k. The maximum acceptable candidate minimum is `10k * 1.5 = 15k`. A candidate asking for a minimum of 16k is disqualified.
-- **Unknown Information Rule:** If either the candidate's minimum salary or the job's minimum salary is "Unknown", the check automatically **fails**. The candidate is disqualified.
+- **Unknown Information Rule:** If the candidate's minimum salary is "Unknown" and the job's minimum salary is not "Unknown", the check **fails**. The candidate is disqualified.
 - **Proceed or Stop:** If the salary check fails, stop all further analysis. The candidate is not qualified. If it passes, proceed to Step 2.
 
 ### Step 2: Sequential "Must-Have" Condition Check
@@ -69,7 +69,7 @@ Your final output must be a JSON object containing `is_qualified` and `reason`. 
 Before producing the final output, perform a mandatory self-check: Does the value of `is_qualified` perfectly align with the verdict in the first sentence of `reason`? If not, you must correct `is_qualified` to match the `reason`'s statement. This is a non-negotiable final step. Do not suggest negotiation, flexibility, or alternative outcomes.
 """
 
-PROMPT_CACHE_KEY = "hr_eval_prompt_v1016"
+PROMPT_CACHE_KEY = "hr_eval_prompt_v0105"
 
 class interviewer(BaseModel):
     reason: str
@@ -79,40 +79,32 @@ class interviewer(BaseModel):
 def is_qualified(client, resume_image_base64, resume_requirement):
     if resume_requirement:
         try:
-            response = client.beta.chat.completions.parse(
+            response = client.responses.parse(
                 model="gpt-5-mini",
                 prompt_cache_key=PROMPT_CACHE_KEY,
-                messages=[
+                instructions=system_message,
+                input=[
                     {
-                        "role": "developer",
-                        "content": system_message
-                    },
-                    {
+                        "type": "message",
                         "role": "user",
                         "content": [
                             {
-                                "type": "text",
+                                "type": "input_text",
                                 "text": f"职位要求:\n{resume_requirement}\n\n"
                             },
                             {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{resume_image_base64}"
-                                }
+                                "type": "input_image",
+                                "image_url": f"data:image/png;base64,{resume_image_base64}"
                             }
                         ]
                     }
                 ],
-                # temperature=0.2,
-                reasoning_effort="low",
-                max_tokens=1200,
-                response_format = interviewer,
-                top_p=1,
-                frequency_penalty=0,
-                presence_penalty=0,
+                reasoning={"effort": "low"},
+                max_output_tokens=1400,
+                text_format=interviewer,
                 timeout=60.0  # 设置超时
             )
-            result = response.choices[0].message.parsed
+            result = response.output_parsed
             logger.llm(f"{result.is_qualified} - {result.reason:50}")
             return result.is_qualified
         except Timeout:

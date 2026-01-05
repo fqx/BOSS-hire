@@ -61,6 +61,7 @@ def launch_webdriver(url):
     options.add_argument('--enable-network-service-logging')
     options.add_argument("--timeout=30")
     options.add_argument("--read-timeout=30")
+    options.add_argument('--disable-notifications')
 
     # 允许跨域访问
     options.add_argument('--user-data-dir=/tmp/chrome_dev_test')
