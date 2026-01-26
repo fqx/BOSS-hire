@@ -4,7 +4,7 @@ from openai import OpenAI
 
 import undetected_chromedriver as uc
 # from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
-import driver_utils, llm_utils, job_utils, log_utils
+import driver_utils, llm_utils, job_utils, log_utils, wakelock_utils
 
 global driver
 
@@ -88,29 +88,30 @@ if __name__ == '__main__':
     driver_utils.goto_recommend(driver)
 
 
-    # Process each job configuration
-    for params in job_configs:
-        job_title = params['job_title']
-        max_idx = params.get('max_idx', 120)
-        log_utils.logger.info(f"开始处理职位：{job_title}")
+    # Process each job configuration with WakeLock to prevent system sleep
+    with wakelock_utils.WakeLock():
+        for params in job_configs:
+            job_title = params['job_title']
+            max_idx = params.get('max_idx', 120)
+            log_utils.logger.info(f"开始处理职位：{job_title}")
 
-        # close popover
-        driver_utils.close_popover(driver)
+            # close popover
+            driver_utils.close_popover(driver)
 
-        # Select specific job position
-        driver_utils.select_job_position(driver, job_title)
+            # Select specific job position
+            driver_utils.select_job_position(driver, job_title)
 
-        # Get job requirements
-        job_requirements = job_utils.get_job_requirements(params['job_requirements'])
+            # Get job requirements
+            job_requirements = job_utils.get_job_requirements(params['job_requirements'])
 
-        # Scan recommend loop for this specific job
-        viewed, greeted = job_utils.loop_recommend(driver, max_idx, job_requirements, client, job_stats, job_title)
+            # Scan recommend loop for this specific job
+            viewed, greeted = job_utils.loop_recommend(driver, max_idx, job_requirements, client, job_stats, job_title)
 
-        # 记录每个职位的统计信息
-        job_stats[job_title] = {
-            'viewed': viewed,
-            'greeted': greeted
-        }
+            # 记录每个职位的统计信息
+            job_stats[job_title] = {
+                'viewed': viewed,
+                'greeted': greeted
+            }
 
-    # Close driver after processing all jobs
-    driver.quit()
+        # Close driver after processing all jobs
+        driver.quit()
