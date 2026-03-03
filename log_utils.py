@@ -16,6 +16,13 @@ def llm(self, message, *args, **kws):
 
 logging.Logger.llm = llm
 
+class HttpSuccessFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        if "HTTP Request:" in msg and "200 OK" in msg:
+            return False
+        return True
+
 class TqdmLoggingHandler(logging.Handler):
     def __init__(self, level=logging.NOTSET):
         super().__init__(level)
@@ -46,6 +53,7 @@ for handler in logger.handlers[:]:
 # 添加自定义的TqdmLoggingHandler用于控制台输出
 tqdm_handler = TqdmLoggingHandler()
 tqdm_handler.setLevel(logging.INFO)
+tqdm_handler.addFilter(HttpSuccessFilter())
 console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 tqdm_handler.setFormatter(console_formatter)
 logger.addHandler(tqdm_handler)

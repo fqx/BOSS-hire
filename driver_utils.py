@@ -169,7 +169,7 @@ def select_job_position(driver, job_title):
         time.sleep(1)  # Wait for dropdown to expand
 
         # Find all job options in the dropdown
-        job_options = driver.find_elements(By.XPATH, "//div[@class='ui-dropmenu-list']/ul/li")
+        job_options = driver.find_elements(By.XPATH, "//ul[@class='job-list']/li[contains(@class,'job-item')]")
 
         # Find the first job option that starts with the given job_title
         selected_job = None

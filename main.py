@@ -66,7 +66,7 @@ def launch_webdriver(url):
     # 允许跨域访问
     options.add_argument('--user-data-dir=/tmp/chrome_dev_test')
     options.add_argument('--allow-cross-origin-auth-prompt')
-    driver = uc.Chrome(use_subprocess=True, options=options)
+    driver = uc.Chrome(use_subprocess=True, options=options, version_main=145)
     driver.set_page_load_timeout(30)  # Set page load timeout to 30 seconds
     driver.get(url)
     # driver.maximize_window()
