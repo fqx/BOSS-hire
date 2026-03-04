@@ -1,15 +1,21 @@
 # from langchain.chat_models import ChatOpenAI
 # from langchain.prompts import PromptTemplate
 # from langchain.embeddings import OpenAIEmbeddings
+import json
+import re
+import time
 from pydantic import BaseModel
 from requests.exceptions import Timeout
-import logging, os
+import os
+import openai
 from dotenv import load_dotenv
 from log_utils import logger
 load_dotenv()
 
 # LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # logging.basicConfig(level=LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
+
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5-mini")
 
 system_message = """## Role and Goal
 You are a highly experienced, meticulous, and objective Human Resources (HR) evaluation expert. Your primary mission is to act as an automated screening agent, rigorously assessing a candidate's resume against a given job description (JD). Your final output must be a precise, rule-based determination of the candidate's qualification status.
@@ -69,47 +75,132 @@ Your final output must be a JSON object containing `is_qualified` and `reason`. 
 Before producing the final output, perform a mandatory self-check: Does the value of `is_qualified` perfectly align with the verdict in the first sentence of `reason`? If not, you must correct `is_qualified` to match the `reason`'s statement. This is a non-negotiable final step. Do not suggest negotiation, flexibility, or alternative outcomes.
 """
 
-PROMPT_CACHE_KEY = "hr_eval_prompt_v0105"
-
 class interviewer(BaseModel):
     reason: str
     is_qualified: bool
 
 
-def is_qualified(client, resume_image_base64, resume_requirement):
-    if resume_requirement:
+def _parse_content(content: str) -> interviewer:
+    """Parse raw text into interviewer when output_parsed is unavailable."""
+    # Strategy 1: direct JSON parse
+    try:
+        return interviewer(**json.loads(content))
+    except Exception:
+        pass
+    # Strategy 2: JSON inside markdown code block
+    m = re.search(r"```(?:json)?\s*(\{.*?})\s*```", content, re.DOTALL)
+    if m:
         try:
-            response = client.responses.parse(
-                model="gpt-5-mini",
-                prompt_cache_key=PROMPT_CACHE_KEY,
-                instructions=system_message,
-                input=[
-                    {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": f"职位要求:\n{resume_requirement}\n\n"
-                            },
-                            {
-                                "type": "input_image",
-                                "image_url": f"data:image/png;base64,{resume_image_base64}"
-                            }
-                        ]
-                    }
-                ],
-                reasoning={"effort": "low"},
-                max_output_tokens=1400,
-                text_format=interviewer,
-                timeout=60.0  # 设置超时
-            )
-            result = response.output_parsed
+            return interviewer(**json.loads(m.group(1)))
+        except Exception:
+            pass
+    # Strategy 3: first JSON object in text
+    m = re.search(r"\{.*}", content, re.DOTALL)
+    if m:
+        try:
+            return interviewer(**json.loads(m.group(0)))
+        except Exception:
+            pass
+    raise ValueError(f"Cannot parse LLM response: {content[:200]}")
+
+
+PROMPT_CACHE_KEY = "hr_eval_prompt_v0105"
+RETRY_DELAYS = [10, 30]  # seconds to wait before 1st and 2nd retry
+
+_base_url = os.getenv("OPENAI_BASE_URL", "")
+_local_hosts = ("localhost", "127.0.0.1", "::1")
+_is_openai_cloud = (
+    not any(h in _base_url for h in _local_hosts)
+    and LLM_MODEL.lower().startswith("gpt")
+)
+MAX_OUTPUT_TOKENS = 1400  # for Responses API (cloud)
+# Chat Completions API: thinking tokens are hidden, visible output is small JSON
+MAX_TOKENS_CHAT = 1400
+
+
+def _call_responses_api(client, resume_image_base64: str, resume_requirement: str) -> interviewer:
+    """OpenAI cloud path: Responses API with prompt caching and reasoning."""
+    response = client.responses.parse(
+        model=LLM_MODEL,
+        prompt_cache_key=PROMPT_CACHE_KEY,
+        instructions=system_message,
+        input=[
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": f"职位要求:\n{resume_requirement}\n\n"},
+                    {"type": "input_image", "image_url": f"data:image/png;base64,{resume_image_base64}"}
+                ]
+            }
+        ],
+        reasoning={"effort": "low"},
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        text_format=interviewer,
+        timeout=60.0,
+    )
+    if response.output_parsed is not None:
+        return response.output_parsed
+    return _parse_content(response.output_text)
+
+
+def _call_chat_api(client, resume_image_base64: str, resume_requirement: str) -> interviewer:
+    """Local LM Studio path: Chat Completions API with json_schema output."""
+    response = client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[
+            {"role": "system", "content": system_message},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"职位要求:\n{resume_requirement}\n\n"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{resume_image_base64}"}}
+                ]
+            }
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "interviewer", "schema": interviewer.model_json_schema()}
+        },
+        max_tokens=MAX_TOKENS_CHAT,
+        timeout=60.0,
+    )
+    return _parse_content(response.choices[0].message.content)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Channel Error / server crash is worth retrying; bad requests are not."""
+    if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
+        return True
+    if isinstance(exc, openai.InternalServerError):
+        return True
+    # LM Studio reports model-backend crashes as APIStatusError with "Channel Error"
+    if isinstance(exc, openai.APIStatusError) and "channel error" in str(exc).lower():
+        return True
+    return False
+
+
+def is_qualified(client, resume_image_base64, resume_requirement):
+    if not resume_requirement:
+        return False
+
+    for attempt, delay in enumerate([0] + RETRY_DELAYS, start=1):
+        if delay:
+            logger.warning(f"Retrying LLM request (attempt {attempt}) after {delay}s...")
+            time.sleep(delay)
+        try:
+            if _is_openai_cloud:
+                result = _call_responses_api(client, resume_image_base64, resume_requirement)
+            else:
+                result = _call_chat_api(client, resume_image_base64, resume_requirement)
             logger.llm(f"{result.is_qualified} - {result.reason:50}")
             return result.is_qualified
         except Timeout:
-            logger.warning("OpenAI API request timed out")
+            logger.warning("LLM API request timed out")
             return False
         except Exception as e:
-            logger.error(f"Error in OpenAI API request: {e}")
+            if _is_retryable(e) and attempt <= len(RETRY_DELAYS):
+                logger.warning(f"LLM backend error (will retry): {e}")
+                continue
+            logger.error(f"Error in LLM API request: {e}")
             return False
