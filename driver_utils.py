@@ -119,7 +119,7 @@ async def get_age(tab, idx) -> int:
     return int(matches[0]) if matches else 99
 
 
-async def get_resume(tab, idx) -> str | None:
+async def get_resume(tab, idx) -> tuple[str | None, str]:
     await asyncio.sleep(max(2 + gauss(0, 1), 1))
     await _frame_xpath_click(tab, xpath_resume_card.format(i=idx))
     await asyncio.sleep(3)
@@ -143,7 +143,14 @@ async def get_resume(tab, idx) -> str | None:
             return null;
         })()
     """)
-    return canvas_base64
+
+    # Extract the "经历概览" sidebar text from the recommendFrame DOM
+    overview_text = await _in_frame(tab, """
+        var summary = doc.querySelector('.resume-summary');
+        return summary ? summary.innerText.trim() : '';
+    """) or ''
+
+    return canvas_base64, overview_text
 
 
 async def say_hi(tab):
@@ -201,3 +208,4 @@ async def close_popover(tab):
         """)
         if not closed:
             break
+        await asyncio.sleep(0.5)

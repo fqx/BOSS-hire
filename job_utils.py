@@ -172,8 +172,8 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
                                 if check_if_contains_any_character(job_requirements['cv_required_keywords'], resume_text):
                                     logger.info("#{} 简历符合要求。调用LLM进一步处理。".format(idx))
 
-                                    resume_image_base64 = await driver_utils.get_resume(tab, idx)
-                                    is_qualified = llm_utils.is_qualified(client, resume_image_base64, job_requirements['cv_requirements'])
+                                    resume_image_base64, overview_text = await driver_utils.get_resume(tab, idx)
+                                    is_qualified = llm_utils.is_qualified(client, resume_image_base64, job_requirements['cv_requirements'], overview_text)
                                     viewed += 1
                                     update_job_stats(job_title, viewed, greeted)
 

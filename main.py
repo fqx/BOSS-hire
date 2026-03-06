@@ -1,4 +1,4 @@
-import os, argparse, asyncio, atexit
+import os, argparse, asyncio
 import commentjson as json
 from openai import OpenAI
 
@@ -63,9 +63,6 @@ async def launch_browser(url):
 
 
 async def main():
-    # Register the exit handler
-    atexit.register(log_final_stats)
-
     # Get all job configurations
     job_configs = get_params()
 
@@ -75,33 +72,36 @@ async def main():
     await driver_utils.close_popover(tab)
     await driver_utils.goto_recommend(tab)
 
-    # Process each job configuration with WakeLock to prevent system sleep
-    with wakelock_utils.WakeLock():
-        for params in job_configs:
-            job_title = params['job_title']
-            max_idx = params.get('max_idx', 120)
-            log_utils.logger.info(f"开始处理职位：{job_title}")
+    try:
+        # Process each job configuration with WakeLock to prevent system sleep
+        with wakelock_utils.WakeLock():
+            for params in job_configs:
+                job_title = params['job_title']
+                max_idx = params.get('max_idx', 120)
+                log_utils.logger.info(f"开始处理职位：{job_title}")
 
-            # close popover
-            # await driver_utils.close_popover(tab)
+                # close popover
+                await driver_utils.close_popover(tab)
 
-            # Select specific job position
-            await driver_utils.select_job_position(tab, job_title)
+                # Select specific job position
+                await driver_utils.select_job_position(tab, job_title)
 
-            # Get job requirements
-            job_requirements = job_utils.get_job_requirements(params['job_requirements'])
+                # Get job requirements
+                job_requirements = job_utils.get_job_requirements(params['job_requirements'])
 
-            # Scan recommend loop for this specific job
-            viewed, greeted = await job_utils.loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_title)
+                # Scan recommend loop for this specific job
+                viewed, greeted = await job_utils.loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_title)
 
-            # 记录每个职位的统计信息
-            job_stats[job_title] = {
-                'viewed': viewed,
-                'greeted': greeted
-            }
-
-    # Close browser after processing all jobs
-    await browser.stop()
+                # 记录每个职位的统计信息
+                job_stats[job_title] = {
+                    'viewed': viewed,
+                    'greeted': greeted
+                }
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        log_final_stats()
+        await browser.stop()
 
 
 if __name__ == '__main__':

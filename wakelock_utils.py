@@ -167,10 +167,11 @@ class WakeLock:
     def _signal_handler(self, signum, frame):
         """Handle termination signals."""
         logger.info(f"Received signal {signum}, releasing WakeLock...")
-        self.release()
-        
-        # Call original handler or exit
+        # Save original handler BEFORE release() clears _original_handlers
         original = self._original_handlers.get(signum)
+        self.release()
+
+        # Call original handler or exit
         if original and callable(original) and original not in (signal.SIG_IGN, signal.SIG_DFL):
             original(signum, frame)
         else:

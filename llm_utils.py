@@ -4,6 +4,7 @@
 import json
 import re
 import time
+from datetime import date
 from pydantic import BaseModel
 from requests.exceptions import Timeout
 import os
@@ -21,7 +22,7 @@ system_message = """## Role and Goal
 You are a highly experienced, meticulous, and objective Human Resources (HR) evaluation expert. Your primary mission is to act as an automated screening agent, rigorously assessing a candidate's resume against a given job description (JD). Your final output must be a precise, rule-based determination of the candidate's qualification status.
 
 ## Core Evaluation Principles
-1.  **Objectivity and Evidence-Based:** Your entire analysis must be based *solely* on the text provided in the candidate's resume and the job description. Do not make assumptions, infer missing information, or apply any external knowledge.
+1.  **Objectivity and Evidence-Based:** Your entire analysis must be based *solely* on the text provided in the candidate's resume and the job description. Do not fabricate facts or apply speculative external knowledge. However, you **must** perform reasonable contextual inference from evidence present in the resume text itself: if a candidate's job responsibilities, products worked on, employer descriptions, or domain-specific terminology clearly indicate a particular industry, you **must** treat this as valid industry experience — even if the candidate does not use the exact phrase from the JD. For example, a candidate who worked on medical device firmware is inferred to have medical device industry experience; a candidate whose resume describes work on loan disbursement systems at a bank is inferred to have financial industry experience.
 2.  **Strict Adherence to Rules:** You must follow all specified rules, especially the distinction between "must-have" and "preferred" conditions, the salary calculation, and the output formatting. There is no room for leniency or "almost-fits" judgments.
 3.  **Consistency is Paramount:** The final boolean flag `is_qualified` must perfectly mirror the conclusion stated in the first sentence of the `reason`. This is a critical consistency check.
 
@@ -46,6 +47,7 @@ This is the first and most critical gate.
 If the salary check was successful, now evaluate the mandatory requirements one by one, in the order they appear in the JD.
 - **Identifying "Must-Have" Conditions:** A condition is considered mandatory if it contains keywords like "需要" (need), "必须" (must), "硬性" (hard requirement), "要求" (require), "至少" (at least), "不低于" (no less than), "限定" (limited to), "仅限" (only for), "必备" (essential). Also, treat explicit, non-negotiable quantifiers (e.g., "学历：本科", "3年经验", "持有PMP证书", "工作地点在北京") as "must-have" conditions.
 - **Identifying "Preferred" Conditions:** A condition is non-mandatory (a plus) if it contains keywords like "优先" (preferred), "加分" (bonus points), "最好" (best if), "希望" (hope), "熟悉" (familiar with), "了解" (understand), "优先考虑" (will be considered with priority), "可选" (optional), "不限" (no limit). If a JD says "学历不限" (education unlimited), it cannot be used as a disqualifying factor.
+- **Industry Experience Inference:** When a JD requires experience in a specific industry (e.g., "医疗行业经验", "金融行业背景", "新能源领域"), do NOT require the candidate to state this explicitly. Instead, look for supporting evidence in the resume: the nature of the company (from the candidate's own description), the products or services the candidate worked on, the domain terminology used in job duties, or the sector of the candidate's clients. If such evidence clearly points to the required industry, the condition is met. Only reject on this criterion if there is no such evidence at all.
 - **Stop at First Failure:** As soon as you find the *first* "must-have" condition that the candidate does not meet, stop all further analysis. The candidate is disqualified.
 
 ### Step 3: Special Case Handling
@@ -115,10 +117,17 @@ _is_openai_cloud = (
 )
 MAX_OUTPUT_TOKENS = 1400  # for Responses API (cloud)
 # Chat Completions API: thinking tokens are hidden, visible output is small JSON
-MAX_TOKENS_CHAT = 1400
+MAX_TOKENS_CHAT = 2000
 
 
-def _call_responses_api(client, resume_image_base64: str, resume_requirement: str) -> interviewer:
+def _build_user_text(resume_requirement: str, overview_text: str) -> str:
+    text = f"职位要求:\n{resume_requirement}\n\n"
+    if overview_text:
+        text += f"候选人经历概览（结构化工作、项目、教育经历摘要，供参考）:\n{overview_text}\n\n"
+    return text
+
+
+def _call_responses_api(client, resume_image_base64: str, resume_requirement: str, overview_text: str) -> interviewer:
     """OpenAI cloud path: Responses API with prompt caching and reasoning."""
     response = client.responses.parse(
         model=LLM_MODEL,
@@ -129,7 +138,7 @@ def _call_responses_api(client, resume_image_base64: str, resume_requirement: st
                 "type": "message",
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": f"职位要求:\n{resume_requirement}\n\n"},
+                    {"type": "input_text", "text": _build_user_text(resume_requirement, overview_text)},
                     {"type": "input_image", "image_url": f"data:image/png;base64,{resume_image_base64}"}
                 ]
             }
@@ -144,16 +153,18 @@ def _call_responses_api(client, resume_image_base64: str, resume_requirement: st
     return _parse_content(response.output_text)
 
 
-def _call_chat_api(client, resume_image_base64: str, resume_requirement: str) -> interviewer:
+def _call_chat_api(client, resume_image_base64: str, resume_requirement: str, overview_text: str) -> interviewer:
     """Local LM Studio path: Chat Completions API with json_schema output."""
+    today = date.today().strftime("%Y-%m-%d")
+    system_with_date = f"Today's date is {today}.\n\n{system_message}"
     response = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[
-            {"role": "system", "content": system_message},
+            {"role": "system", "content": system_with_date},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"职位要求:\n{resume_requirement}\n\n"},
+                    {"type": "text", "text": _build_user_text(resume_requirement, overview_text)},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{resume_image_base64}"}}
                 ]
             }
@@ -180,7 +191,7 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
-def is_qualified(client, resume_image_base64, resume_requirement):
+def is_qualified(client, resume_image_base64, resume_requirement, overview_text: str = ""):
     if not resume_requirement:
         return False
 
@@ -190,9 +201,9 @@ def is_qualified(client, resume_image_base64, resume_requirement):
             time.sleep(delay)
         try:
             if _is_openai_cloud:
-                result = _call_responses_api(client, resume_image_base64, resume_requirement)
+                result = _call_responses_api(client, resume_image_base64, resume_requirement, overview_text)
             else:
-                result = _call_chat_api(client, resume_image_base64, resume_requirement)
+                result = _call_chat_api(client, resume_image_base64, resume_requirement, overview_text)
             logger.llm(f"{result.is_qualified} - {result.reason:50}")
             return result.is_qualified
         except Timeout:
