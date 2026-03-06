@@ -11,7 +11,7 @@ This project is an automated resume screening tool that uses OpenAI's GPT models
 
 ## Prerequisites
 
-- Python 3.6+
+- Python 3.10+
 - Chrome browser
 
 ## Installation
@@ -40,11 +40,11 @@ This project is an automated resume screening tool that uses OpenAI's GPT models
 
 ## How it works
 
-1. The script launches an undetected Chrome browser and navigates to the specified URL.
-2. It logs into the job platform using credentials (make sure to implement this securely).
-3. Job requirements are extracted from the provided source.
-4. The script then loops through recommended candidates, evaluating each profile against the job requirements using OpenAI's GPT model.
-5. Results are logged and can be further processed as needed.
+1. The script launches a Chrome browser via [zendriver](https://github.com/cdpdriver/zendriver) (CDP-based, undetectable by anti-bot systems) and navigates to the specified URL.
+2. It prompts login via QR code scan and waits for the session to be established.
+3. Job requirements are loaded from the config file.
+4. The script loops through recommended candidates, evaluating each profile against the job requirements using OpenAI's GPT model.
+5. Qualified candidates are greeted automatically. Results are logged to console and `boss_hire.log`.
 
 ## Contributing
 

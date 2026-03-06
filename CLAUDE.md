@@ -10,8 +10,8 @@ This is a Python-based resume screening automation tool that uses OpenAI's GPT m
 
 The codebase is organized into modular utility files:
 
-- **main.py** - Entry point that orchestrates the entire workflow: launches webdriver, processes job configurations, coordinates candidate screening
-- **driver_utils.py** - Selenium WebDriver utilities for browser automation: login, navigation, UI interactions with job platform
+- **main.py** - Async entry point (`asyncio.run`): launches zendriver browser, processes job configurations, coordinates candidate screening
+- **driver_utils.py** - zendriver (CDP-based) browser automation utilities: login, navigation, UI interactions with job platform. All functions are async. Iframe content in `recommendFrame` is accessed via `_in_frame()` JS helper using `tab.evaluate()`.
 - **job_utils.py** - Job processing logic: candidate evaluation loop, requirement matching, statistics tracking
 - **llm_utils.py** - OpenAI integration with structured evaluation system: candidate qualification assessment using Pydantic models
 - **log_utils.py** - Custom logging system with tqdm integration and multiple output handlers (console + file)
@@ -56,7 +56,7 @@ Multiple job configurations can be processed in a single run by providing an arr
 
 ## Key Dependencies
 
-- **selenium + undetected-chromedriver**: Web automation for job platform interaction
+- **zendriver**: CDP-based async browser automation, undetectable by anti-bot systems
 - **openai**: AI-powered candidate evaluation 
 - **pydantic**: Structured data validation for evaluation responses
 - **tqdm**: Progress tracking with custom logging integration
