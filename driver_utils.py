@@ -1,221 +1,203 @@
-import time
+import asyncio
 from log_utils import logger
-# from selenium import webdriver
-from selenium.common import NoSuchElementException, ElementClickInterceptedException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.support import expected_conditions as EC
 import re
 from random import gauss
 
-from io import BytesIO
-from PIL import Image
-import base64
-
-import os
-from dotenv import load_dotenv
-load_dotenv()
 
 
-# import undetected_chromedriver as uc
-xpath_age = '//*[@id="recommend-list"]/div/ul/li[{}]/div/div[1]/div[2]/div[2]/div'
-xpath_resume_card_is_viewed = '//*[@id="recommend-list"]/div/ul/li[{}]'
-xpath_resume_card = '//*[@id="recommend-list"]/div/ul/li[{}]/div/div[1]'
-xpath_resume_page = '//div[@class="resume-detail-wrap"]'
-xpath_resume_section = '//div[starts-with(@class, "resume-section")]'
+xpath_age = '//*[@id="recommend-list"]/div/ul/li[{i}]/div/div[1]/div[2]/div[2]/div'
+xpath_resume_card_is_viewed = '//*[@id="recommend-list"]/div/ul/li[{i}]'
+xpath_resume_card = '//*[@id="recommend-list"]/div/ul/li[{i}]/div/div[1]'
 xpath_say_hi = '//button[starts-with(@class, "btn-v2 btn-sure-v2 btn-greet")]'
 xpath_i_know_after_say_hi = '//button[contains(text(),"知道了")]'
 xpath_resume_close = '//i[@class="icon-close"]'
 
 
-def log_in(driver):
-    driver.get('https://www.zhipin.com/web/user/?intent=1')
-    time.sleep(3)
-    try:
-        qr_button = driver.find_element(By.XPATH, '//*[@id="wrap"]/div/div[2]/div[2]/div[1]')
-        qr_button.click()
-    except NoSuchElementException:
+async def _in_frame(tab, js_body: str):
+    """Execute js_body inside the recommendFrame context.
+
+    The JS snippet has access to:
+      doc - the iframe's contentDocument
+      win - the iframe's contentWindow
+    Returns whatever the snippet returns, or None if the frame is absent.
+    """
+    return await tab.evaluate(f"""
+        (function() {{
+            var frame = document.querySelector('iframe[name="recommendFrame"]');
+            if (!frame || !frame.contentDocument) return null;
+            var doc = frame.contentDocument;
+            var win = frame.contentWindow;
+            {js_body}
+        }})()
+    """)
+
+
+async def _frame_xpath_click(tab, xpath):
+    """Click the first element matching xpath inside the recommendFrame."""
+    await _in_frame(tab, f"""
+        var res = doc.evaluate({repr(xpath)}, doc, null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        var node = res.singleNodeValue;
+        if (node) node.click();
+    """)
+
+
+async def log_in(tab):
+    await tab.get('https://www.zhipin.com/web/user/?intent=1')
+    await asyncio.sleep(3)
+    results = await tab.xpath('//*[@id="wrap"]/div/div[2]/div[2]/div[1]')
+    if results:
+        await results[0].click()
+    else:
         logger.warning("Maybe we have logged in?")
-    # time.sleep(1)
-    # imgdata = base64.b64decode(driver.get_screenshot_as_base64())
-    # img = Image.open(BytesIO(imgdata))
-    # logger.info('请扫描二维码登录。')
-    # img.show()
-    wait = WebDriverWait(driver, 30)
-    wait.until(EC.url_to_be('https://www.zhipin.com/web/chat/index'))
+
+    target_url = 'https://www.zhipin.com/web/chat/index'
+    for _ in range(60):  # 30s timeout
+        await asyncio.sleep(0.5)
+        if tab.url == target_url:
+            break
+    else:
+        logger.warning("Login timeout")
 
     logger.info("Logged in.")
-    time.sleep(3)
+    await asyncio.sleep(3)
 
 
-def goto_recommend(driver):
-    driver.find_element(By.LINK_TEXT, "推荐牛人").click()
-    iframe = WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.NAME, "recommendFrame"))
-    )
-    time.sleep(5)
-    driver.switch_to.frame(iframe)
-
-
-def find_resume_card(driver, idx):
-    div = driver.find_element(By.XPATH, xpath_resume_card.format(idx))
-    return div
-
-
-def is_viewed(driver, idx):
-    try:
-        card = driver.find_element(By.XPATH, xpath_resume_card_is_viewed.format(idx))
-        card_inner =card.find_element(By.CSS_SELECTOR, "div[class^='card-inner']")
-        is_viewed = "has-viewed" in card_inner.get_attribute("class")
-        return is_viewed
-    except NoSuchElementException:
-        logger.warning(f"#{idx} 加载失败。")
-        scroll_down(driver)
-        time.sleep(3)
-        return False
-
-
-def get_age(driver, idx):
-    while True:
-        try:
-            age = driver.find_element(By.XPATH, xpath_age.format(idx)).text
+async def goto_recommend(tab):
+    link = await tab.find("推荐牛人")
+    await link.click()
+    # Wait for the recommendFrame iframe to appear
+    for _ in range(20):
+        found = await tab.evaluate(
+            '!!document.querySelector(\'iframe[name="recommendFrame"]\')'
+        )
+        if found:
             break
-        except:
-            logger.warning('载入更多简历')
-            # driver.execute_script("window.scrollTo(0, window.scrollY + 180)")
-            time.sleep(1)
-            return 99
-    age = int(re.findall(r'\d+', age)[0])
-    return age
+        await asyncio.sleep(0.5)
+    await asyncio.sleep(2)
 
 
-def get_resume(driver, div):
-    time.sleep(max(2 + gauss(0, 1), 1))
-
-    # div.click()
-    # ActionChains(driver).move_to_element(div).click().perform()
-    driver.execute_script("arguments[0].click();", div)
-    wait = WebDriverWait(driver, 10)
-    iframe_locator = (By.CSS_SELECTOR, "iframe[src*='/web/frame/c-resume/']")
-    wait.until(EC.frame_to_be_available_and_switch_to_it(iframe_locator))
-    # resume_detail = driver.find_element(By.XPATH, xpath_resume_page)
-
-    # resume_text = []
-    # elements = driver.find_elements(By.XPATH, xpath_resume_section)
-    # for element in elements:
-    #     text = element.get_attribute('textContent').strip()  # Remove leading/trailing whitespace
-    #     if text:  # Only add non-empty strings
-    #         resume_text.append(text)
-    #
-    # resume_text = " ■ ".join(resume_text)  # Join with a custom separator
-    # # resume_text =  resume_detail.get_attribute('textContent').strip()
-    # resume_text = re.sub('\\n\s+','',resume_text)
-
-    # iframe = driver.find_element(By.TAG_NAME, "iframe")
-    # driver.switch_to.frame(iframe)
-    wait.until(EC.visibility_of_element_located((By.XPATH, "//canvas[@id='resume']")))
-
-    canvas_base64 = driver.execute_script("""
-        var canvas = document.querySelector('canvas#resume');
-        if (!canvas) {
-            throw new Error('Canvas not found');
-        }
-
-        console.log('Canvas dimensions:', canvas.width, 'x', canvas.height);
-
-        // 直接从Canvas获取完整图像数据
-        return canvas.toDataURL('image/png').substring(22);
+async def get_resume_card_text(tab, idx) -> str:
+    """Return textContent of resume card at position idx."""
+    result = await _in_frame(tab, f"""
+        var res = doc.evaluate({repr(xpath_resume_card.format(i=idx))}, doc, null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        var card = res.singleNodeValue;
+        return card ? card.textContent : null;
     """)
-    driver.switch_to.parent_frame()
+    return result or ''
 
+
+async def is_viewed(tab, idx) -> bool:
+    result = await _in_frame(tab, f"""
+        var res = doc.evaluate({repr(xpath_resume_card_is_viewed.format(i=idx))}, doc, null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        var card = res.singleNodeValue;
+        if (!card) return null;
+        var inner = card.querySelector("div[class*='card-inner']");
+        return inner ? inner.className : '';
+    """)
+    if result is None:
+        logger.warning(f"#{idx} 加载失败。")
+        await scroll_down(tab)
+        await asyncio.sleep(3)
+        return False
+    return 'has-viewed' in str(result)
+
+
+async def get_age(tab, idx) -> int:
+    result = await _in_frame(tab, f"""
+        var res = doc.evaluate({repr(xpath_age.format(i=idx))}, doc, null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+        var elem = res.singleNodeValue;
+        return elem ? elem.textContent : null;
+    """)
+    if not result:
+        logger.warning('载入更多简历')
+        return 99
+    matches = re.findall(r'\d+', result)
+    return int(matches[0]) if matches else 99
+
+
+async def get_resume(tab, idx) -> str | None:
+    await asyncio.sleep(max(2 + gauss(0, 1), 1))
+    await _frame_xpath_click(tab, xpath_resume_card.format(i=idx))
+    await asyncio.sleep(3)
+
+    # Canvas lives inside a nested c-resume iframe within the recommendFrame
+    canvas_base64 = await tab.evaluate("""
+        (function() {
+            var frame = document.querySelector('iframe[name="recommendFrame"]');
+            if (!frame) return null;
+            try {
+                var doc = frame.contentDocument;
+                var cFrame = doc.querySelector('iframe[src*="c-resume"]');
+                if (cFrame) {
+                    var canvas = cFrame.contentDocument.querySelector('canvas#resume');
+                    if (canvas) return canvas.toDataURL('image/png').substring(22);
+                }
+                // fallback: canvas directly in recommend frame
+                var canvas = doc.querySelector('canvas#resume');
+                if (canvas) return canvas.toDataURL('image/png').substring(22);
+            } catch(e) {}
+            return null;
+        })()
+    """)
     return canvas_base64
 
 
-def say_hi(driver):
-    time.sleep(1)
-    say_hi_botton = driver.find_element(By.XPATH, xpath_say_hi)
-    say_hi_botton.click()
-    time.sleep(1)
+async def say_hi(tab):
+    await asyncio.sleep(1)
+    await _frame_xpath_click(tab, xpath_say_hi)
+    await asyncio.sleep(1)
     try:
-        driver.find_element(By.XPATH, xpath_i_know_after_say_hi).click()
-    except:
+        await _frame_xpath_click(tab, xpath_i_know_after_say_hi)
+    except Exception:
         pass
 
 
-def close_resume(driver):
-    time.sleep(1)
-    driver.find_element(By.XPATH, xpath_resume_close).click()
+async def close_resume(tab):
+    await asyncio.sleep(1)
+    await _frame_xpath_click(tab, xpath_resume_close)
 
 
-def scroll_down(driver):
-    time.sleep(0.5)
-    driver.execute_script("window.scrollTo(0, window.scrollY + 180)")
+async def scroll_down(tab):
+    await asyncio.sleep(0.5)
+    await _in_frame(tab, "win.scrollTo(0, win.scrollY + 180);")
 
 
-def select_job_position(driver, job_title):
-    """
-    Method to search and select specific job position on BOSS website
+async def select_job_position(tab, job_title):
+    await _in_frame(tab, """
+        var dropdown = doc.querySelector('.ui-dropmenu-label');
+        if (dropdown) dropdown.click();
+    """)
+    await asyncio.sleep(1)
 
-    Args:
-        driver: Selenium WebDriver instance
-        job_title: Job title to search and select
-    """
-    try:
-        # Click on the dropdown menu to expand job options
-        dropdown_menu = driver.find_element(By.XPATH, "//div[@class='ui-dropmenu-label']")
-        dropdown_menu.click()
-        time.sleep(1)  # Wait for dropdown to expand
-
-        # Find all job options in the dropdown
-        job_options = driver.find_elements(By.XPATH, "//ul[@class='job-list']/li[contains(@class,'job-item')]")
-
-        # Find the first job option that starts with the given job_title
-        selected_job = None
-        for option in job_options:
-            if option.text.startswith(job_title):
-                selected_job = option
-                break
-
-        # If a matching job is found, click on it
-        if selected_job:
-            selected_job.click()
-            logger.info(f"Selected job: {job_title}")
-            time.sleep(5)  # Wait for page to load after selection
-        else:
-            logger.warning(f"No job found starting with: {job_title}")
-
-    except Exception as e:
-        logger.error(f"Error selecting job position: {e}")
-        raise
+    found = await _in_frame(tab, f"""
+        var options = Array.from(doc.querySelectorAll('ul.job-list li.job-item'));
+        for (var opt of options) {{
+            if (opt.textContent.trim().startsWith({repr(job_title)})) {{
+                opt.click();
+                return true;
+            }}
+        }}
+        return false;
+    """)
+    if found:
+        logger.info(f"Selected job: {job_title}")
+        await asyncio.sleep(5)
+    else:
+        logger.warning(f"No job found starting with: {job_title}")
 
 
-def close_popover(driver):
+async def close_popover(tab):
     while True:
-        try:
-            close_button = driver.find_element(By.CLASS_NAME, "iboss-close")
-            close_button.click()
-        except:
-            break  # No more close buttons found, exit the loop
-
-
-def highlight_element(driver, element, color="red", border_width=3):
-    """Highlights an element by adding a colored border"""
-    # Store original style
-    original_style = element.get_attribute("style")
-
-    # Add highlight style
-    driver.execute_script(
-        f"arguments[0].style.border = '{border_width}px solid {color}';",
-        element
-    )
-
-    # Wait to see the highlight
-    time.sleep(2)
-
-    # Restore original style
-    driver.execute_script(
-        f"arguments[0].setAttribute('style', '{original_style}');",
-        element
-    )
+        closed = await tab.evaluate("""
+            (function() {
+                var btn = document.querySelector('.iboss-close');
+                if (btn) { btn.click(); return true; }
+                return false;
+            })()
+        """)
+        if not closed:
+            break

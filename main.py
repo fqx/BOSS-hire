@@ -1,12 +1,9 @@
-import os, argparse, time, atexit
+import os, argparse, asyncio, atexit
 import commentjson as json
 from openai import OpenAI
 
-import undetected_chromedriver as uc
-# from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
+import zendriver as zd
 import driver_utils, llm_utils, job_utils, log_utils, wakelock_utils
-
-global driver
 
 # from packaging import version
 from dotenv import load_dotenv
@@ -47,46 +44,36 @@ def get_params():
         # If not a list, convert to list for consistent processing
         return [config] if not isinstance(config, list) else config
 
-def launch_webdriver(url):
-
-    options = uc.ChromeOptions()
-
-    # 禁用Web安全性以允许跨域Canvas操作
-    options.add_argument('--disable-web-security')
-    options.add_argument('--disable-features=VizDisplayCompositor')
-    options.add_argument('--allow-running-insecure-content')
-    options.add_argument('--disable-extensions')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--enable-network-service-logging')
-    options.add_argument("--timeout=30")
-    options.add_argument("--read-timeout=30")
-    options.add_argument('--disable-notifications')
-
-    # 允许跨域访问
-    options.add_argument('--user-data-dir=/tmp/chrome_dev_test')
-    options.add_argument('--allow-cross-origin-auth-prompt')
-    driver = uc.Chrome(use_subprocess=True, options=options, version_main=145)
-    driver.set_page_load_timeout(30)  # Set page load timeout to 30 seconds
-    driver.get(url)
-    # driver.maximize_window()
-    time.sleep(2)
-    return driver
+async def launch_browser(url):
+    browser = await zd.start(
+        headless=False,
+        user_data_dir='/tmp/chrome_dev_test',
+        browser_args=[
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor',
+            '--allow-running-insecure-content',
+            '--disable-dev-shm-usage',
+            '--disable-notifications',
+            '--allow-cross-origin-auth-prompt',
+        ]
+    )
+    tab = await browser.get(url)
+    await asyncio.sleep(2)
+    return browser, tab
 
 
-if __name__ == '__main__':
+async def main():
     # Register the exit handler
     atexit.register(log_final_stats)
 
     # Get all job configurations
     job_configs = get_params()
 
-    # Launch webdriver once
-    driver = launch_webdriver(job_configs[0]['url'])
-    driver_utils.log_in(driver)
-    driver_utils.close_popover(driver)
-    driver_utils.goto_recommend(driver)
-
+    # Launch browser once
+    browser, tab = await launch_browser(job_configs[0]['url'])
+    await driver_utils.log_in(tab)
+    await driver_utils.close_popover(tab)
+    await driver_utils.goto_recommend(tab)
 
     # Process each job configuration with WakeLock to prevent system sleep
     with wakelock_utils.WakeLock():
@@ -96,16 +83,16 @@ if __name__ == '__main__':
             log_utils.logger.info(f"开始处理职位：{job_title}")
 
             # close popover
-            driver_utils.close_popover(driver)
+            # await driver_utils.close_popover(tab)
 
             # Select specific job position
-            driver_utils.select_job_position(driver, job_title)
+            await driver_utils.select_job_position(tab, job_title)
 
             # Get job requirements
             job_requirements = job_utils.get_job_requirements(params['job_requirements'])
 
             # Scan recommend loop for this specific job
-            viewed, greeted = job_utils.loop_recommend(driver, max_idx, job_requirements, client, job_stats, job_title)
+            viewed, greeted = await job_utils.loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_title)
 
             # 记录每个职位的统计信息
             job_stats[job_title] = {
@@ -113,5 +100,9 @@ if __name__ == '__main__':
                 'greeted': greeted
             }
 
-        # Close driver after processing all jobs
-        driver.quit()
+    # Close browser after processing all jobs
+    await browser.stop()
+
+
+if __name__ == '__main__':
+    asyncio.run(main())

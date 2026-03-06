@@ -1,4 +1,3 @@
-from selenium.common import ElementClickInterceptedException
 from tqdm import tqdm
 import driver_utils, llm_utils
 import os, re
@@ -127,7 +126,7 @@ def check_if_contains_any_character(a_list, b_string):
   return False
 
 
-def loop_recommend(driver, max_idx, job_requirements, client, job_stats, job_title):
+async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_title):
     idx = 0
     viewed = 0
     greeted = 0
@@ -154,22 +153,15 @@ def loop_recommend(driver, max_idx, job_requirements, client, job_stats, job_tit
         while idx < max_idx:
             try:
                 idx += 1
-                if driver_utils.is_viewed(driver, idx):
+                if await driver_utils.is_viewed(tab, idx):
                     logger.info(f"#{idx} 已经查看过。")
-                    driver_utils.scroll_down(driver)
+                    await driver_utils.scroll_down(tab)
                     pbar.update(1)
-                    # pbar.refresh()
                     continue
 
-                age = driver_utils.get_age(driver, idx)
+                age = await driver_utils.get_age(tab, idx)
                 if job_requirements['age_lower_bound'] <= age <= job_requirements['age_upper_bound']:
-                    div_resume = driver_utils.find_resume_card(driver, idx)
-                    resume_text = div_resume.get_attribute('textContent')
-
-                    # Save resume text to file
-                    # with open(resume_text_file, 'a', encoding='utf-8') as f:
-                    #     f.write(resume_text)
-                    #     f.write('\n')
+                    resume_text = await driver_utils.get_resume_card_text(tab, idx)
 
                     resume_dict = parse_resume(resume_text)
                     if job_requirements['maximum_salary'] <= 0 or (resume_dict['salary_lower_bound'] is not None and job_requirements['maximum_salary'] > resume_dict['salary_lower_bound'] > 0):
@@ -180,60 +172,53 @@ def loop_recommend(driver, max_idx, job_requirements, client, job_stats, job_tit
                                 if check_if_contains_any_character(job_requirements['cv_required_keywords'], resume_text):
                                     logger.info("#{} 简历符合要求。调用LLM进一步处理。".format(idx))
 
-                                    resume_image_base64 = driver_utils.get_resume(driver, div_resume)
+                                    resume_image_base64 = await driver_utils.get_resume(tab, idx)
                                     is_qualified = llm_utils.is_qualified(client, resume_image_base64, job_requirements['cv_requirements'])
                                     viewed += 1
                                     update_job_stats(job_title, viewed, greeted)
 
                                     if is_qualified:
                                         logger.info(f"#{idx} 符合要求，打招呼。")
-                                        driver_utils.say_hi(driver)
+                                        await driver_utils.say_hi(tab)
                                         greeted += 1
                                         update_job_stats(job_title, viewed, greeted)
                                     else:
                                         logger.info(f"#{idx} 不符合要求。")
-                                    driver_utils.close_resume(driver)
-                                    driver_utils.scroll_down(driver)
+                                    await driver_utils.close_resume(tab)
+                                    await driver_utils.scroll_down(tab)
                                     pbar.update(1)
-                                    # pbar.refresh()
                                     continue
                                 else:
                                     logger.info('#{} 关键词不符合要求。'.format(idx))
-                                    driver_utils.scroll_down(driver)
+                                    await driver_utils.scroll_down(tab)
                                     pbar.update(1)
                                     continue
                             else:
                                 logger.info('#{} 在职情况不符合要求。'.format(idx))
-                                driver_utils.scroll_down(driver)
+                                await driver_utils.scroll_down(tab)
                                 pbar.update(1)
                                 continue
                         else:
                             logger.info('#{} 教育情况不符合要求。'.format(idx))
-                            driver_utils.scroll_down(driver)
+                            await driver_utils.scroll_down(tab)
                             pbar.update(1)
                             continue
                     else:
                         logger.info('#{} 薪资不符合要求。'.format(idx))
-                        driver_utils.scroll_down(driver)
+                        await driver_utils.scroll_down(tab)
                         pbar.update(1)
                         continue
 
                 logger.info('#{} 年龄不符合要求。'.format(idx))
-                driver_utils.scroll_down(driver)
+                await driver_utils.scroll_down(tab)
                 pbar.update(1)
-                # pbar.refresh()
-                continue
-
-            except ElementClickInterceptedException as e:
-                logger.warning(f"An error occurred: {e}")
-                logger.info("Try next one.")
-                pbar.update(1)
-                # pbar.refresh()
                 continue
 
             except Exception as e:
                 logger.warning(f"An error occurred: {e}")
-                break
+                logger.info("Try next one.")
+                pbar.update(1)
+                continue
 
     log_handler.set_tqdm(None)
     logger.info(f"简历查看数：{viewed}   打招呼人数：{greeted}")
