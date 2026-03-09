@@ -214,6 +214,8 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
                 pbar.update(1)
                 continue
 
+            except TimeoutError:
+                raise
             except Exception as e:
                 logger.warning(f"An error occurred: {e}")
                 logger.info("Try next one.")

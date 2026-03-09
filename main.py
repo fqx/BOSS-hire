@@ -97,6 +97,8 @@ async def main():
                     'viewed': viewed,
                     'greeted': greeted
                 }
+    except TimeoutError as e:
+        log_utils.logger.warning(f"服务器无响应，终止处理：{e}")
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:

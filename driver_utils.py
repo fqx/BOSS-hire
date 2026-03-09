@@ -119,13 +119,11 @@ async def get_age(tab, idx) -> int:
     return int(matches[0]) if matches else 99
 
 
-async def get_resume(tab, idx) -> tuple[str | None, str]:
-    await asyncio.sleep(max(2 + gauss(0, 1), 1))
-    await _frame_xpath_click(tab, xpath_resume_card.format(i=idx))
-    await asyncio.sleep(3)
+RESUME_LOAD_TIMEOUT = 10  # seconds to wait for resume canvas to appear
 
-    # Canvas lives inside a nested c-resume iframe within the recommendFrame
-    canvas_base64 = await tab.evaluate("""
+
+async def _get_canvas_base64(tab):
+    return await tab.evaluate("""
         (function() {
             var frame = document.querySelector('iframe[name="recommendFrame"]');
             if (!frame) return null;
@@ -143,6 +141,21 @@ async def get_resume(tab, idx) -> tuple[str | None, str]:
             return null;
         })()
     """)
+
+
+async def get_resume(tab, idx) -> tuple[str | None, str]:
+    await asyncio.sleep(max(2 + gauss(0, 1), 1))
+    await _frame_xpath_click(tab, xpath_resume_card.format(i=idx))
+
+    # Poll until canvas appears or timeout
+    deadline = asyncio.get_event_loop().time() + RESUME_LOAD_TIMEOUT
+    while True:
+        canvas_base64 = await _get_canvas_base64(tab)
+        if canvas_base64 is not None:
+            break
+        if asyncio.get_event_loop().time() >= deadline:
+            raise TimeoutError(f"#{idx} 简历加载超时 ({RESUME_LOAD_TIMEOUT}s)。")
+        await asyncio.sleep(1)
 
     # Extract the "经历概览" sidebar text from the recommendFrame DOM
     overview_text = await _in_frame(tab, """
