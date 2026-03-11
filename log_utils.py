@@ -35,7 +35,7 @@ class TqdmLoggingHandler(logging.Handler):
         try:
             msg = self.format(record)
             # 如果有活跃的tqdm实例，使用其write方法
-            if self._tqdm_instance:
+            if self._tqdm_instance is not None:
                 self._tqdm_instance.write(msg)
             else:
                 tqdm.write(msg)

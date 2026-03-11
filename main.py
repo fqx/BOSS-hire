@@ -28,7 +28,14 @@ def log_final_stats():
     """Function to log final statistics when program exits"""
     log_utils.logger.llm("职位处理统计：")
     for job_title, stats in job_stats.items():
-        log_utils.logger.llm(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")
+        parts = []
+        if 'viewed' in stats:
+            parts.append(f"简历查看数 {stats['viewed']}")
+        if 'greeted' in stats:
+            parts.append(f"打招呼人数 {stats['greeted']}")
+        if 'requested' in stats:
+            parts.append(f"求简历人数 {stats['requested']}")
+        log_utils.logger.llm(f"职位 {job_title}：{'，'.join(parts)}")
 
 
 def get_params():
@@ -70,11 +77,17 @@ async def main():
     browser, tab = await launch_browser(job_configs[0]['url'])
     await driver_utils.log_in(tab)
     await driver_utils.close_popover(tab)
-    await driver_utils.goto_recommend(tab)
 
     try:
         # Process each job configuration with WakeLock to prevent system sleep
         with wakelock_utils.WakeLock():
+            # Phase 1: inbound greeting candidates (新招呼)
+            await driver_utils.goto_new_greetings(tab)
+            await job_utils.loop_greetings(tab, job_configs, client, job_stats)
+            await driver_utils.close_popover(tab)
+
+            # Phase 2: outbound recommendation screening (推荐牛人)
+            await driver_utils.goto_recommend(tab)
             for params in job_configs:
                 job_title = params['job_title']
                 max_idx = params.get('max_idx', 120)

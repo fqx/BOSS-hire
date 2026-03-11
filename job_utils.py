@@ -1,4 +1,5 @@
 from tqdm import tqdm
+import asyncio
 import driver_utils, llm_utils
 import os, re
 from log_utils import logger
@@ -96,9 +97,9 @@ default_job_requirements = {
 
 
 def get_job_requirements(job_requirements):
-    for key, value in job_requirements.items():
-        default_job_requirements[key] = value
-    return default_job_requirements
+    result = dict(default_job_requirements)
+    result.update(job_requirements)
+    return result
 
 
 def check_if_contains_any_character(a_list, b_string):
@@ -124,6 +125,94 @@ def check_if_contains_any_character(a_list, b_string):
 
   # If no match is found, return False.
   return False
+
+
+async def loop_greetings(tab, job_configs: list, client, job_stats: dict) -> int:
+    """Process unread candidates in 新招呼 for all configured job positions."""
+    job_map = {
+        cfg['job_title']: get_job_requirements(cfg.get('job_requirements', {}))
+        for cfg in job_configs
+    }
+
+    MAX_SCAN = 200
+    idx = 1
+    processed = 0
+    skipped = 0
+
+    log_handler = logger.handlers[0]
+    with tqdm(desc="新招呼", unit="人") as pbar:
+        log_handler.set_tqdm(pbar)
+        try:
+            while idx <= MAX_SCAN:
+                unread = await driver_utils.is_greeting_unread(tab, idx)
+                if unread is None:
+                    break
+                if not unread:
+                    idx += 1
+                    continue
+
+                list_title = await driver_utils.get_greeting_job_title_at(tab, idx)
+                matched = next((t for t in job_map if list_title.startswith(t)), None)
+                if matched is None:
+                    logger.info(f"跳过（职位未配置）：{list_title}")
+                    idx += 1
+                    skipped += 1
+                    continue
+
+                await driver_utils.open_greeting_at(tab, idx)
+
+                chat_title = await driver_utils.get_current_chat_job_title(tab)
+                if chat_title:
+                    matched = next((t for t in job_map if chat_title.startswith(t)), matched)
+
+                requirements = job_map[matched]
+
+                try:
+                    await driver_utils.open_online_resume_greeting(tab)
+                    canvas_b64, overview_text = await asyncio.wait_for(
+                        driver_utils.get_online_resume_greeting(tab),
+                        timeout=driver_utils.GREETING_RESUME_LOAD_TIMEOUT,
+                    )
+                    await driver_utils.close_online_resume_greeting(tab)
+                except (TimeoutError, Exception) as e:
+                    logger.warning(f"在线简历加载失败，跳过：{e}")
+                    idx += 1
+                    pbar.update(1)
+                    continue
+
+                result = llm_utils.is_qualified_result(
+                    client, canvas_b64, requirements['cv_requirements'], overview_text
+                )
+
+                if result is None:
+                    logger.warning("LLM 调用失败，跳过")
+                    idx += 1
+                    pbar.update(1)
+                    continue
+
+                try:
+                    if result.is_qualified:
+                        logger.info(f"符合，发送招呼消息：{matched}")
+                        await driver_utils.request_resume(tab)
+                        job_stats.setdefault(matched, {})['requested'] = job_stats.get(matched, {}).get('requested', 0) + 1
+                    else:
+                        reason = result.reason_category or '其他原因'
+                        logger.info(f"不符合（{reason}），标记不合适：{matched}")
+                        await driver_utils.mark_unsuitable(tab, reason)
+                except Exception as e:
+                    logger.warning(f"执行操作失败，跳过：{e}")
+                    idx += 1
+                    pbar.update(1)
+                    continue
+
+                processed += 1
+                pbar.update(1)
+                # After action, this item leaves 新招呼; idx stays (next candidate fills slot)
+        finally:
+            log_handler.set_tqdm(None)
+
+    logger.info(f"新招呼完成：处理 {processed} 人，跳过（职位未配置）{skipped} 人")
+    return processed
 
 
 async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_title):
@@ -172,7 +261,10 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
                                 if check_if_contains_any_character(job_requirements['cv_required_keywords'], resume_text):
                                     logger.info("#{} 简历符合要求。调用LLM进一步处理。".format(idx))
 
-                                    resume_image_base64, overview_text = await driver_utils.get_resume(tab, idx)
+                                    resume_image_base64, overview_text = await asyncio.wait_for(
+                                        driver_utils.get_resume(tab, idx),
+                                        timeout=driver_utils.RESUME_LOAD_TIMEOUT,
+                                    )
                                     is_qualified = llm_utils.is_qualified(client, resume_image_base64, job_requirements['cv_requirements'], overview_text)
                                     viewed += 1
                                     update_job_stats(job_title, viewed, greeted)
@@ -215,6 +307,7 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
                 continue
 
             except TimeoutError:
+                logger.warning(f"#{idx} 简历加载超时 ({driver_utils.RESUME_LOAD_TIMEOUT}s)，终止处理。")
                 raise
             except Exception as e:
                 logger.warning(f"An error occurred: {e}")

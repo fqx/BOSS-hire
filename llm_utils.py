@@ -54,8 +54,13 @@ If the salary check was successful, now evaluate the mandatory requirements one 
 - **Employment Status:** If the candidate's current employment status listed at the top of the resume (e.g., "离职-随时到岗") conflicts with the dates of their last job entry, you **must** trust the status listed at the top.
 - **Online Activity:** Do not interpret a candidate's online activity status (e.g., "在线", "刚刚活跃", "x日内活跃") as their employment status. It is irrelevant to the evaluation.
 
+如果候选人不符合，还需要在 reason_category 字段中输出一个最匹配的原因，
+必须从以下选项中选择一个（原文，不能修改）：
+薪资不符、学历不符、年龄不符、期望不符、距离太远、过往经历不符、简历不真实、已找到工作、其他原因
+如果候选人符合，reason_category 输出空字符串 ""。
+
 ## Output Generation Rules (Strictly Enforced)
-Your final output must be a JSON object containing `is_qualified` and `reason`. The generation of this output must follow a specific, unchangeable order.
+Your final output must be a JSON object containing `is_qualified`, `reason`, and `reason_category`. The generation of this output must follow a specific, unchangeable order.
 
 1.  **Determine the Final Conclusion:** Based on your step-by-step analysis, you will have a final conclusion: either "Qualified" or "Not Qualified" (with the specific reason for failure).
 
@@ -80,6 +85,7 @@ Before producing the final output, perform a mandatory self-check: Does the valu
 class interviewer(BaseModel):
     reason: str
     is_qualified: bool
+    reason_category: str = ""  # one of 9 preset values, or "" if qualified
 
 
 def _parse_content(content: str) -> interviewer:
@@ -117,7 +123,7 @@ _is_openai_cloud = (
 )
 MAX_OUTPUT_TOKENS = 1400  # for Responses API (cloud)
 # Chat Completions API: thinking tokens are hidden, visible output is small JSON
-MAX_TOKENS_CHAT = 2000
+MAX_TOKENS_CHAT = 2800
 
 
 def _build_user_text(resume_requirement: str, overview_text: str) -> str:
@@ -191,10 +197,8 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
-def is_qualified(client, resume_image_base64, resume_requirement, overview_text: str = ""):
-    if not resume_requirement:
-        return False
-
+def _call_llm(client, resume_image_base64: str, resume_requirement: str, overview_text: str) -> interviewer | None:
+    """Shared retry logic for both is_qualified and is_qualified_result."""
     for attempt, delay in enumerate([0] + RETRY_DELAYS, start=1):
         if delay:
             logger.warning(f"Retrying LLM request (attempt {attempt}) after {delay}s...")
@@ -205,13 +209,28 @@ def is_qualified(client, resume_image_base64, resume_requirement, overview_text:
             else:
                 result = _call_chat_api(client, resume_image_base64, resume_requirement, overview_text)
             logger.llm(f"{result.is_qualified} - {result.reason:50}")
-            return result.is_qualified
+            return result
         except Timeout:
             logger.warning("LLM API request timed out")
-            return False
+            return None
         except Exception as e:
             if _is_retryable(e) and attempt <= len(RETRY_DELAYS):
                 logger.warning(f"LLM backend error (will retry): {e}")
                 continue
             logger.error(f"Error in LLM API request: {e}")
-            return False
+            return None
+    return None
+
+
+def is_qualified(client, resume_image_base64, resume_requirement, overview_text: str = ""):
+    if not resume_requirement:
+        return False
+    result = _call_llm(client, resume_image_base64, resume_requirement, overview_text)
+    return result.is_qualified if result is not None else False
+
+
+def is_qualified_result(client, resume_image_base64, resume_requirement, overview_text: str = "") -> interviewer | None:
+    """Return the full interviewer object (includes reason_category). Returns None on failure."""
+    if not resume_requirement:
+        return None
+    return _call_llm(client, resume_image_base64, resume_requirement, overview_text)
