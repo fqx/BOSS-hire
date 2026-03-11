@@ -310,6 +310,7 @@ async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
 
 async def close_online_resume_greeting(tab):
     """Close the online resume modal via .boss-popup__close (click handler is on the div, not the i)."""
+    await asyncio.sleep(max(2 + gauss(0, 1), 1))
     await tab.evaluate("""
         (function() {
             var btn = document.querySelector('.boss-popup__close');
