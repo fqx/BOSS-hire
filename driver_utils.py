@@ -435,8 +435,11 @@ async def close_popover(tab):
         closed = await tab.evaluate("""
             (function() {
                 var btn = document.querySelector('.iboss-close');
-                if (btn) { btn.click(); return true; }
-                return false;
+                if (!btn) return false;
+                var rect = btn.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) return false;
+                btn.click();
+                return true;
             })()
         """)
         if not closed:
