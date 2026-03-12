@@ -318,7 +318,19 @@ async def close_online_resume_greeting(tab):
             return false;
         })()
     """)
-    await asyncio.sleep(1)
+    # Wait until modal is fully gone before returning — a fixed 1s sleep is not enough
+    # when the close animation is slow or the click was missed.
+    for _ in range(20):
+        still_open = await tab.evaluate("""
+            (function() {
+                var el = document.querySelector('.boss-popup__close');
+                return el !== null && el.offsetParent !== null;
+            })()
+        """)
+        if not still_open:
+            break
+        await asyncio.sleep(0.3)
+    await asyncio.sleep(0.3)  # brief buffer after modal disappears
 
 
 GREETING_QUALIFIED_MSG = "您好，感谢您的主动联系！您的背景很符合我们的要求，麻烦发一份简历给我看看~"
@@ -368,28 +380,39 @@ async def mark_unsuitable(tab, reason_category: str):
     await tab.mouse_click(coords['x'], coords['y'])
     await asyncio.sleep(2)
 
-    # Wait for reason-list to populate (renders async after dialog opens)
-    for _ in range(10):
-        count = await tab.evaluate("document.querySelector('.reason-list')?.children.length || 0")
-        if count:
+    # Wait until the specific reason item we need is in the DOM (items may load in batches)
+    escaped = reason_category.replace("'", "\\'")
+    for _ in range(20):
+        found = await tab.evaluate(f"""
+            (function() {{
+                var items = document.querySelectorAll('.reason-item');
+                for (var item of items) {{
+                    if (item.innerText.trim() === '{escaped}') return true;
+                }}
+                return false;
+            }})()
+        """)
+        if found:
             break
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
-    # Click reason item via JS .click() — element is in a modal so coordinates are unreliable
-    escaped = reason_category.replace('"', '\\"')
+    # Click reason item via innerText.trim() comparison (more robust than XPath normalize-space)
     clicked_reason = await tab.evaluate(f"""
         (function() {{
-            var result = document.evaluate(
-                '//*[contains(@class,"reason-item") and normalize-space()="{escaped}"]',
-                document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
-            );
-            var node = result.singleNodeValue;
-            if (node) {{ node.click(); return node.outerHTML.substring(0, 100); }}
-            return null;
+            var items = document.querySelectorAll('.reason-item');
+            for (var item of items) {{
+                if (item.innerText.trim() === '{escaped}') {{
+                    item.click();
+                    return item.outerHTML.substring(0, 100);
+                }}
+            }}
+            var available = Array.from(items).map(i => i.innerText.trim()).join(', ');
+            return 'NOT_FOUND:' + available;
         }})()
     """)
-    if not clicked_reason:
-        raise RuntimeError(f"Could not find reason button: {reason_category}")
+    if not clicked_reason or clicked_reason.startswith('NOT_FOUND:'):
+        available = clicked_reason[len('NOT_FOUND:'):] if clicked_reason else '(empty)'
+        raise RuntimeError(f"Could not find reason button: {reason_category!r}, available: {available}")
     await asyncio.sleep(1)
 
     # Confirm if a confirm button appears
