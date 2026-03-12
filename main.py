@@ -1,4 +1,4 @@
-import os, argparse, asyncio, glob
+import os, argparse, asyncio, glob, subprocess
 import commentjson as json
 from openai import OpenAI
 
@@ -52,6 +52,7 @@ def get_params():
         return [config] if not isinstance(config, list) else config
 
 def clear_chrome_locks():
+    subprocess.run(["pkill", "-9", "-f", "chrome_dev_test"], capture_output=True)
     for f in glob.glob('/tmp/chrome_dev_test/Singleton*'):
         try:
             os.remove(f)
@@ -60,6 +61,7 @@ def clear_chrome_locks():
 
 async def launch_browser(url):
     clear_chrome_locks()
+    await asyncio.sleep(1)
     browser = await zd.start(
         headless=False,
         user_data_dir='/tmp/chrome_dev_test',
