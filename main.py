@@ -53,11 +53,17 @@ def get_params():
 
 def clear_chrome_locks():
     subprocess.run(["pkill", "-9", "-f", "chrome_dev_test"], capture_output=True)
-    for f in glob.glob('/tmp/chrome_dev_test/Singleton*'):
-        try:
-            os.remove(f)
-        except FileNotFoundError:
-            pass
+    patterns = [
+        '/tmp/chrome_dev_test/Singleton*',
+        '/tmp/chrome_dev_test/Default/Lock',
+        '/tmp/chrome_dev_test/Default/LOCK',
+    ]
+    for pattern in patterns:
+        for f in glob.glob(pattern):
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
 
 async def launch_browser(url):
     clear_chrome_locks()
