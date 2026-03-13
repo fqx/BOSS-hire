@@ -78,7 +78,10 @@ async def launch_browser(url):
             '--disable-dev-shm-usage',
             '--disable-notifications',
             '--allow-cross-origin-auth-prompt',
-        ]
+            '--window-size=1920,1080',
+        ],
+        browser_connection_timeout=1.0,
+        browser_connection_max_tries=15,
     )
     tab = await browser.get(url)
     await asyncio.sleep(2)
