@@ -204,11 +204,19 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict) -> int
                     if result.is_qualified:
                         logger.info(f"符合，发送招呼消息：{matched}")
                         await driver_utils.request_resume(tab)
+                        # already_navigated intentionally NOT set here: request_resume (send message)
+                        # does not trigger platform auto-navigation. Setting it True would cause an
+                        # infinite loop if the platform stays on the same candidate (re-process same
+                        # person indefinitely). Worst case without the flag: one candidate skipped
+                        # if the platform ever does auto-navigate after a send — an acceptable loss.
                         job_stats.setdefault(matched, {})['requested'] = job_stats.get(matched, {}).get('requested', 0) + 1
                     else:
                         reason = result.reason_category or '其他原因'
                         logger.info(f"不符合（{reason}），标记不合适：{matched}")
                         await driver_utils.mark_unsuitable(tab, reason)
+                        # mark_unsuitable removes the candidate from the list and the platform
+                        # auto-opens the next candidate, clearing their unread badge. Skip the
+                        # unread check on the next iteration to avoid skipping that candidate.
                         already_navigated = True
                 except Exception as e:
                     logger.warning(f"执行操作失败，跳过：{e}")
