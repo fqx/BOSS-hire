@@ -361,24 +361,33 @@ async def request_resume(tab):
 
 async def mark_unsuitable(tab, reason_category: str):
     """Click 不合适 button, then click the matching preset reason in the dialog."""
-    # Get coordinates and use tab.mouse_click — JS .click() and element.click() don't trigger Vue handlers
-    pos = await tab.evaluate("""
+    # If the panel is already open (platform kept it open after auto-navigating to this candidate),
+    # skip the button click — clicking it again would submit the panel instead of keeping it open.
+    panel_open = await tab.evaluate("""
         (function() {
-            var spans = document.querySelectorAll('.operate-btn');
-            for (var s of spans) {
-                if (s.innerText.trim() === '不合适') {
-                    var r = s.getBoundingClientRect();
-                    return JSON.stringify({x: r.left + r.width / 2, y: r.top + r.height / 2});
-                }
-            }
-            return null;
+            var items = document.querySelectorAll('.reason-item');
+            return items.length > 0;
         })()
     """)
-    if not pos:
-        raise RuntimeError("Could not find 不合适 button")
-    coords = json.loads(pos)
-    await tab.mouse_click(coords['x'], coords['y'])
-    await asyncio.sleep(2)
+    if not panel_open:
+        # Get coordinates and use tab.mouse_click — JS .click() and element.click() don't trigger Vue handlers
+        pos = await tab.evaluate("""
+            (function() {
+                var spans = document.querySelectorAll('.operate-btn');
+                for (var s of spans) {
+                    if (s.innerText.trim() === '不合适') {
+                        var r = s.getBoundingClientRect();
+                        return JSON.stringify({x: r.left + r.width / 2, y: r.top + r.height / 2});
+                    }
+                }
+                return null;
+            })()
+        """)
+        if not pos:
+            raise RuntimeError("Could not find 不合适 button")
+        coords = json.loads(pos)
+        await tab.mouse_click(coords['x'], coords['y'])
+        await asyncio.sleep(2)
 
     # Wait until the specific reason item we need is in the DOM (items may load in batches)
     escaped = reason_category.replace("'", "\\'")
@@ -416,7 +425,7 @@ async def mark_unsuitable(tab, reason_category: str):
     await asyncio.sleep(1)
 
     # Confirm if a confirm button appears
-    confirmed = await tab.evaluate("""
+    await tab.evaluate("""
         (function() {
             var all = document.querySelectorAll('*');
             for (var el of all) {
