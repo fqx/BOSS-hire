@@ -1,4 +1,5 @@
 import asyncio
+import json
 from log_utils import logger
 import re
 from random import gauss
@@ -61,6 +62,21 @@ async def log_in(tab):
 
     logger.info("Logged in.")
     await asyncio.sleep(3)
+
+
+async def ensure_list_view(tab):
+    """Switch candidate list to list view if it is currently in grid view."""
+    await _in_frame(tab, """
+        var uses = doc.querySelectorAll('.mode-item use');
+        for (var i = 0; i < uses.length; i++) {
+            var href = uses[i].getAttribute('xlink:href') || uses[i].getAttribute('href') || '';
+            if (href.indexOf('mode1') !== -1) {
+                var btn = uses[i].closest('.mode-item');
+                if (btn && !btn.classList.contains('curr')) btn.click();
+                break;
+            }
+        }
+    """)
 
 
 async def goto_recommend(tab):
@@ -147,14 +163,11 @@ async def get_resume(tab, idx) -> tuple[str | None, str]:
     await asyncio.sleep(max(2 + gauss(0, 1), 1))
     await _frame_xpath_click(tab, xpath_resume_card.format(i=idx))
 
-    # Poll until canvas appears or timeout
-    deadline = asyncio.get_event_loop().time() + RESUME_LOAD_TIMEOUT
+    # Poll until canvas appears; overall timeout is enforced by asyncio.wait_for() in the caller
     while True:
         canvas_base64 = await _get_canvas_base64(tab)
         if canvas_base64 is not None:
             break
-        if asyncio.get_event_loop().time() >= deadline:
-            raise TimeoutError(f"#{idx} 简历加载超时 ({RESUME_LOAD_TIMEOUT}s)。")
         await asyncio.sleep(1)
 
     # Extract the "经历概览" sidebar text from the recommendFrame DOM
@@ -206,8 +219,240 @@ async def select_job_position(tab, job_title):
     if found:
         logger.info(f"Selected job: {job_title}")
         await asyncio.sleep(5)
+        await ensure_list_view(tab)
     else:
         logger.warning(f"No job found starting with: {job_title}")
+
+
+# XPath constants for 新招呼 list (verified via DevTools)
+xpath_greeting_items = '//*[contains(@class,"geek-item-wrap")]'
+xpath_greeting_unread_badge = './/span[contains(@class,"badge-count")]'
+xpath_greeting_job_sub = './/span[@class="source-job"]'
+xpath_chat_job_title = '//*[contains(@class,"source-job")]'  # same class used in list items
+
+GREETING_RESUME_LOAD_TIMEOUT = 15  # seconds
+
+
+async def goto_new_greetings(tab):
+    """Navigate to 沟通 -> 新招呼 tab, then switch to 未读 filter."""
+    await tab.get('https://www.zhipin.com/web/chat/index')
+    await asyncio.sleep(2)
+    link = await tab.find("新招呼")
+    await link.click()
+    await asyncio.sleep(2)
+    # Click 未读 to show only unread candidates
+    unread_tab = await tab.find("未读")
+    await unread_tab.click()
+    await asyncio.sleep(1)
+
+
+async def is_greeting_unread(tab, idx) -> bool | None:
+    """True if idx-th list item (1-based) has an unread badge; None if item doesn't exist."""
+    items = await tab.xpath(xpath_greeting_items)
+    if idx > len(items):
+        return None
+    item = items[idx - 1]
+    badge = await item.query_selector('span[class*="badge-count"]')
+    if not badge:
+        return False
+    return bool(badge.text and badge.text.strip())
+
+
+async def get_greeting_job_title_at(tab, idx) -> str:
+    """Job title text from the idx-th list item."""
+    items = await tab.xpath(xpath_greeting_items)
+    if idx > len(items):
+        return ''
+    item = items[idx - 1]
+    sub = await item.query_selector('.source-job')
+    if sub:
+        return (sub.text or '').strip()
+    return (item.text or '').strip()
+
+
+async def open_greeting_at(tab, idx):
+    """Click the idx-th candidate to open the chat panel."""
+    items = await tab.xpath(xpath_greeting_items)
+    if idx <= len(items):
+        await items[idx - 1].click()
+    await asyncio.sleep(1.5)
+
+
+async def get_current_chat_job_title(tab) -> str:
+    """Read the job title from the active chat panel (same source-job class as list)."""
+    return await tab.evaluate("""
+        (function() {
+            var el = document.querySelector('.source-job');
+            return el ? el.innerText.trim() : '';
+        })()
+    """) or ''
+
+
+async def open_online_resume_greeting(tab):
+    """Click 在线简历 button in the chat panel header."""
+    btn = await tab.find("在线简历")
+    await btn.click()
+    await asyncio.sleep(2)
+
+
+async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
+    """Wait for canvas resume and return (base64_png, overview_text)."""
+    while True:
+        canvas_b64 = await tab.evaluate("""
+            (function() {
+                var f = document.querySelector('iframe[src*="c-resume"]');
+                if (f) {
+                    try {
+                        var c = f.contentDocument.querySelector('canvas#resume');
+                        if (c) return c.toDataURL('image/png').substring(22);
+                    } catch(e) {}
+                }
+                var c = document.querySelector('canvas#resume');
+                return c ? c.toDataURL('image/png').substring(22) : null;
+            })()
+        """)
+        if canvas_b64 is not None:
+            break
+        await asyncio.sleep(1)
+
+    overview_text = await tab.evaluate("""
+        (function() {
+            var s = document.querySelector('.resume-summary');
+            return s ? s.innerText.trim() : '';
+        })()
+    """) or ''
+    return canvas_b64, overview_text
+
+
+async def close_online_resume_greeting(tab):
+    """Close the online resume modal via .boss-popup__close (click handler is on the div, not the i)."""
+    await asyncio.sleep(max(2 + gauss(0, 1), 1))
+    await tab.evaluate("""
+        (function() {
+            var btn = document.querySelector('.boss-popup__close');
+            if (btn) { btn.click(); return true; }
+            return false;
+        })()
+    """)
+    # Wait until modal is fully gone before returning — a fixed 1s sleep is not enough
+    # when the close animation is slow or the click was missed.
+    for _ in range(20):
+        still_open = await tab.evaluate("""
+            (function() {
+                var el = document.querySelector('.boss-popup__close');
+                return el !== null && el.offsetParent !== null;
+            })()
+        """)
+        if not still_open:
+            break
+        await asyncio.sleep(0.3)
+    await asyncio.sleep(0.3)  # brief buffer after modal disappears
+
+
+GREETING_QUALIFIED_MSG = "您好，感谢您的主动联系！您的背景很符合我们的要求，麻烦发一份简历给我看看~"
+
+async def send_chat_message(tab, text: str):
+    """Type text into the chat input and click send."""
+    # Set content on the contenteditable div and fire input event
+    escaped = text.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+    await tab.evaluate(f"""
+        (function() {{
+            var ed = document.querySelector('.boss-chat-editor-input');
+            if (!ed) return;
+            ed.focus();
+            ed.innerText = `{escaped}`;
+            ed.dispatchEvent(new Event('input', {{bubbles: true}}));
+        }})()
+    """)
+    await asyncio.sleep(0.5)
+    send_btn = await tab.find("发送")
+    await send_btn.click()
+    await asyncio.sleep(1)
+
+
+async def request_resume(tab):
+    """Send greeting message to qualified candidate (求简历 requires mutual reply first)."""
+    await send_chat_message(tab, GREETING_QUALIFIED_MSG)
+
+
+async def mark_unsuitable(tab, reason_category: str):
+    """Click 不合适 button, then click the matching preset reason in the dialog."""
+    # If the panel is already open (platform kept it open after auto-navigating to this candidate),
+    # skip the button click — clicking it again would submit the panel instead of keeping it open.
+    panel_open = await tab.evaluate("""
+        (function() {
+            var items = document.querySelectorAll('.reason-item');
+            return items.length > 0;
+        })()
+    """)
+    if not panel_open:
+        # Get coordinates and use tab.mouse_click — JS .click() and element.click() don't trigger Vue handlers
+        pos = await tab.evaluate("""
+            (function() {
+                var spans = document.querySelectorAll('.operate-btn');
+                for (var s of spans) {
+                    if (s.innerText.trim() === '不合适') {
+                        var r = s.getBoundingClientRect();
+                        return JSON.stringify({x: r.left + r.width / 2, y: r.top + r.height / 2});
+                    }
+                }
+                return null;
+            })()
+        """)
+        if not pos:
+            raise RuntimeError("Could not find 不合适 button")
+        coords = json.loads(pos)
+        await tab.mouse_click(coords['x'], coords['y'])
+        await asyncio.sleep(2)
+
+    # Wait until the specific reason item we need is in the DOM (items may load in batches)
+    escaped = reason_category.replace("'", "\\'")
+    for _ in range(20):
+        found = await tab.evaluate(f"""
+            (function() {{
+                var items = document.querySelectorAll('.reason-item');
+                for (var item of items) {{
+                    if (item.innerText.trim() === '{escaped}') return true;
+                }}
+                return false;
+            }})()
+        """)
+        if found:
+            break
+        await asyncio.sleep(0.3)
+
+    # Click reason item via innerText.trim() comparison (more robust than XPath normalize-space)
+    clicked_reason = await tab.evaluate(f"""
+        (function() {{
+            var items = document.querySelectorAll('.reason-item');
+            for (var item of items) {{
+                if (item.innerText.trim() === '{escaped}') {{
+                    item.click();
+                    return item.outerHTML.substring(0, 100);
+                }}
+            }}
+            var available = Array.from(items).map(i => i.innerText.trim()).join(', ');
+            return 'NOT_FOUND:' + available;
+        }})()
+    """)
+    if not clicked_reason or clicked_reason.startswith('NOT_FOUND:'):
+        available = clicked_reason[len('NOT_FOUND:'):] if clicked_reason else '(empty)'
+        raise RuntimeError(f"Could not find reason button: {reason_category!r}, available: {available}")
+    await asyncio.sleep(1)
+
+    # Confirm if a confirm button appears
+    await tab.evaluate("""
+        (function() {
+            var all = document.querySelectorAll('*');
+            for (var el of all) {
+                if (el.children.length === 0 && el.innerText && el.innerText.trim() === '确定') {
+                    el.click(); return true;
+                }
+            }
+            return false;
+        })()
+    """)
+    await asyncio.sleep(1)
 
 
 async def close_popover(tab):
@@ -215,8 +460,11 @@ async def close_popover(tab):
         closed = await tab.evaluate("""
             (function() {
                 var btn = document.querySelector('.iboss-close');
-                if (btn) { btn.click(); return true; }
-                return false;
+                if (!btn) return false;
+                var rect = btn.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) return false;
+                btn.click();
+                return true;
             })()
         """)
         if not closed:

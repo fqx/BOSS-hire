@@ -1,4 +1,4 @@
-import os, argparse, asyncio
+import os, argparse, asyncio, glob, subprocess
 import commentjson as json
 from openai import OpenAI
 
@@ -28,7 +28,14 @@ def log_final_stats():
     """Function to log final statistics when program exits"""
     log_utils.logger.llm("职位处理统计：")
     for job_title, stats in job_stats.items():
-        log_utils.logger.llm(f"职位 {job_title}：简历查看数 {stats['viewed']}，打招呼人数 {stats['greeted']}")
+        parts = []
+        if 'viewed' in stats:
+            parts.append(f"简历查看数 {stats['viewed']}")
+        if 'greeted' in stats:
+            parts.append(f"打招呼人数 {stats['greeted']}")
+        if 'requested' in stats:
+            parts.append(f"求简历人数 {stats['requested']}")
+        log_utils.logger.llm(f"职位 {job_title}：{'，'.join(parts)}")
 
 
 def get_params():
@@ -44,7 +51,23 @@ def get_params():
         # If not a list, convert to list for consistent processing
         return [config] if not isinstance(config, list) else config
 
+def clear_chrome_locks():
+    subprocess.run(["pkill", "-9", "-f", "chrome_dev_test"], capture_output=True)
+    patterns = [
+        '/tmp/chrome_dev_test/Singleton*',
+        '/tmp/chrome_dev_test/Default/Lock',
+        '/tmp/chrome_dev_test/Default/LOCK',
+    ]
+    for pattern in patterns:
+        for f in glob.glob(pattern):
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+
 async def launch_browser(url):
+    clear_chrome_locks()
+    await asyncio.sleep(1)
     browser = await zd.start(
         headless=False,
         user_data_dir='/tmp/chrome_dev_test',
@@ -55,7 +78,10 @@ async def launch_browser(url):
             '--disable-dev-shm-usage',
             '--disable-notifications',
             '--allow-cross-origin-auth-prompt',
-        ]
+            '--window-size=1920,1080',
+        ],
+        browser_connection_timeout=1.0,
+        browser_connection_max_tries=15,
     )
     tab = await browser.get(url)
     await asyncio.sleep(2)
@@ -70,11 +96,17 @@ async def main():
     browser, tab = await launch_browser(job_configs[0]['url'])
     await driver_utils.log_in(tab)
     await driver_utils.close_popover(tab)
-    await driver_utils.goto_recommend(tab)
 
     try:
         # Process each job configuration with WakeLock to prevent system sleep
         with wakelock_utils.WakeLock():
+            # Phase 1: inbound greeting candidates (新招呼)
+            await driver_utils.goto_new_greetings(tab)
+            await job_utils.loop_greetings(tab, job_configs, client, job_stats)
+            await driver_utils.close_popover(tab)
+
+            # Phase 2: outbound recommendation screening (推荐牛人)
+            await driver_utils.goto_recommend(tab)
             for params in job_configs:
                 job_title = params['job_title']
                 max_idx = params.get('max_idx', 120)
