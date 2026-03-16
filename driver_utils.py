@@ -64,6 +64,21 @@ async def log_in(tab):
     await asyncio.sleep(3)
 
 
+async def ensure_list_view(tab):
+    """Switch candidate list to list view if it is currently in grid view."""
+    await _in_frame(tab, """
+        var uses = doc.querySelectorAll('.mode-item use');
+        for (var i = 0; i < uses.length; i++) {
+            var href = uses[i].getAttribute('xlink:href') || uses[i].getAttribute('href') || '';
+            if (href.indexOf('mode1') !== -1) {
+                var btn = uses[i].closest('.mode-item');
+                if (btn && !btn.classList.contains('curr')) btn.click();
+                break;
+            }
+        }
+    """)
+
+
 async def goto_recommend(tab):
     link = await tab.find("推荐牛人")
     await link.click()
@@ -204,6 +219,7 @@ async def select_job_position(tab, job_title):
     if found:
         logger.info(f"Selected job: {job_title}")
         await asyncio.sleep(5)
+        await ensure_list_view(tab)
     else:
         logger.warning(f"No job found starting with: {job_title}")
 
