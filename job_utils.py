@@ -138,32 +138,42 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict) -> int
     idx = 1
     processed = 0
     skipped = 0
+    already_navigated = False
 
     log_handler = logger.handlers[0]
     with tqdm(desc="新招呼", unit="人") as pbar:
         log_handler.set_tqdm(pbar)
         try:
             while idx <= MAX_SCAN:
-                unread = await driver_utils.is_greeting_unread(tab, idx)
-                if unread is None:
-                    break
-                if not unread:
-                    idx += 1
-                    continue
+                matched = None
+                if not already_navigated:
+                    unread = await driver_utils.is_greeting_unread(tab, idx)
+                    if unread is None:
+                        break
+                    if not unread:
+                        idx += 1
+                        continue
 
-                list_title = await driver_utils.get_greeting_job_title_at(tab, idx)
-                matched = next((t for t in job_map if list_title.startswith(t)), None)
-                if matched is None:
-                    logger.info(f"跳过（职位未配置）：{list_title}")
-                    idx += 1
-                    skipped += 1
-                    continue
+                    list_title = await driver_utils.get_greeting_job_title_at(tab, idx)
+                    matched = next((t for t in job_map if list_title.startswith(t)), None)
+                    if matched is None:
+                        logger.info(f"跳过（职位未配置）：{list_title}")
+                        idx += 1
+                        skipped += 1
+                        continue
 
-                await driver_utils.open_greeting_at(tab, idx)
+                    await driver_utils.open_greeting_at(tab, idx)
+                already_navigated = False
 
                 chat_title = await driver_utils.get_current_chat_job_title(tab)
                 if chat_title:
                     matched = next((t for t in job_map if chat_title.startswith(t)), matched)
+
+                if matched is None:
+                    logger.info(f"跳过（职位未配置，自动导航）：{chat_title!r}")
+                    idx += 1
+                    skipped += 1
+                    continue
 
                 requirements = job_map[matched]
 
@@ -199,6 +209,7 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict) -> int
                         reason = result.reason_category or '其他原因'
                         logger.info(f"不符合（{reason}），标记不合适：{matched}")
                         await driver_utils.mark_unsuitable(tab, reason)
+                        already_navigated = True
                 except Exception as e:
                     logger.warning(f"执行操作失败，跳过：{e}")
                     idx += 1
