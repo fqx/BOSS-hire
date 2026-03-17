@@ -101,8 +101,8 @@ async def main():
         # Process each job configuration with WakeLock to prevent system sleep
         with wakelock_utils.WakeLock():
             # Phase 1: inbound greeting candidates (新招呼)
-            await driver_utils.goto_new_greetings(tab)
-            await job_utils.loop_greetings(tab, job_configs, client, job_stats)
+            greeting_count = await driver_utils.goto_new_greetings(tab)
+            await job_utils.loop_greetings(tab, job_configs, client, job_stats, total=greeting_count)
             await driver_utils.close_popover(tab)
 
             # Phase 2: outbound recommendation screening (推荐牛人)

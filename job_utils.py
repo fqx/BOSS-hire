@@ -127,7 +127,7 @@ def check_if_contains_any_character(a_list, b_string):
   return False
 
 
-async def loop_greetings(tab, job_configs: list, client, job_stats: dict) -> int:
+async def loop_greetings(tab, job_configs: list, client, job_stats: dict, total: int = 0) -> int:
     """Process unread candidates in 新招呼 for all configured job positions."""
     job_map = {
         cfg['job_title']: get_job_requirements(cfg.get('job_requirements', {}))
@@ -141,7 +141,7 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict) -> int
     already_navigated = False
 
     log_handler = logger.handlers[0]
-    with tqdm(desc="新招呼", unit="人") as pbar:
+    with tqdm(desc="新招呼", unit="人", total=total or None) as pbar:
         log_handler.set_tqdm(pbar)
         try:
             while idx <= MAX_SCAN:
@@ -166,8 +166,9 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict) -> int
                 already_navigated = False
 
                 chat_title = await driver_utils.get_current_chat_job_title(tab)
-                if chat_title:
-                    matched = next((t for t in job_map if chat_title.startswith(t)), matched)
+                if not chat_title:
+                    break
+                matched = next((t for t in job_map if chat_title.startswith(t)), matched)
 
                 if matched is None:
                     logger.info(f"跳过（职位未配置，自动导航）：{chat_title!r}")

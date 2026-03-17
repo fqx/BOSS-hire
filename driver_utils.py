@@ -233,17 +233,41 @@ xpath_chat_job_title = '//*[contains(@class,"source-job")]'  # same class used i
 GREETING_RESUME_LOAD_TIMEOUT = 15  # seconds
 
 
-async def goto_new_greetings(tab):
-    """Navigate to 沟通 -> 新招呼 tab, then switch to 未读 filter."""
+async def goto_new_greetings(tab) -> int:
+    """Navigate to 沟通 -> 新招呼 tab, then switch to 未读 filter.
+
+    Returns the unread count parsed from the tab label (e.g. '新招呼（3）' -> 3),
+    or 0 if no badge is shown.
+    """
     await tab.get('https://www.zhipin.com/web/chat/index')
     await asyncio.sleep(2)
     link = await tab.find("新招呼")
+    # The count lives in <em class="num"> inside the same <span class="content">,
+    # so link.text (direct text node only) won't include it — query the DOM directly.
+    count = await tab.evaluate(r"""
+        (function() {
+            var spans = document.querySelectorAll('span.content');
+            for (var span of spans) {
+                for (var node of span.childNodes) {
+                    if (node.nodeType === 3 && node.textContent.includes('\u65b0\u62db\u547c')) {
+                        var em = span.querySelector('em.num');
+                        if (em) {
+                            var m = em.innerText.match(/\d+/);
+                            return m ? parseInt(m[0]) : 0;
+                        }
+                    }
+                }
+            }
+            return 0;
+        })()
+    """) or 0
     await link.click()
     await asyncio.sleep(2)
     # Click 未读 to show only unread candidates
     unread_tab = await tab.find("未读")
     await unread_tab.click()
     await asyncio.sleep(1)
+    return count
 
 
 async def is_greeting_unread(tab, idx) -> bool | None:
