@@ -180,9 +180,15 @@ def _call_chat_api(client, resume_image_base64: str, resume_requirement: str, ov
             "json_schema": {"name": "interviewer", "schema": interviewer.model_json_schema()}
         },
         max_tokens=MAX_TOKENS_CHAT,
-        timeout=60.0,
+        timeout=120.0,
     )
-    return _parse_content(response.choices[0].message.content)
+    msg = response.choices[0].message
+    content = msg.content or ""
+    if not content.strip():
+        # LM Studio 0.4.7+: with json_schema format, the structured output
+        # is placed in reasoning_content while content is left empty.
+        content = (msg.model_extra or {}).get("reasoning_content", "") or ""
+    return _parse_content(content)
 
 
 def _is_retryable(exc: Exception) -> bool:
