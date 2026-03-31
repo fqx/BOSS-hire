@@ -102,7 +102,10 @@ async def main():
         with wakelock_utils.WakeLock():
             # Phase 1: inbound greeting candidates (新招呼)
             greeting_count = await driver_utils.goto_new_greetings(tab)
-            await job_utils.loop_greetings(tab, job_configs, client, job_stats, total=greeting_count)
+            if greeting_count > 0:
+                await job_utils.loop_greetings(tab, job_configs, client, job_stats, total=greeting_count)
+            else:
+                log_utils.logger.info("新招呼为空，跳过。")
             await driver_utils.close_popover(tab)
 
             # Phase 2: outbound recommendation screening (推荐牛人)

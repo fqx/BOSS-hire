@@ -302,14 +302,27 @@ async def open_greeting_at(tab, idx):
     await asyncio.sleep(1.5)
 
 
+CHAT_PANEL_LOAD_TIMEOUT = 10  # seconds to wait for chat panel .position-name to appear
+
+
 async def get_current_chat_job_title(tab) -> str:
-    """Read the job title from the active chat panel (same source-job class as list)."""
-    return await tab.evaluate("""
-        (function() {
-            var el = document.querySelector('.source-job');
-            return el ? el.innerText.trim() : '';
-        })()
-    """) or ''
+    """Read the job title from the active chat panel (.position-name inside .conversation-box).
+
+    Polls until .position-name appears, to handle async panel loading after both explicit
+    open_greeting_at() clicks and platform auto-navigation after mark_unsuitable().
+    Returns '' on timeout.
+    """
+    for _ in range(CHAT_PANEL_LOAD_TIMEOUT * 2):
+        result = await tab.evaluate("""
+            (function() {
+                var el = document.querySelector('.conversation-box .position-name');
+                return el ? el.innerText.trim() : null;
+            })()
+        """)
+        if result:
+            return result
+        await asyncio.sleep(0.5)
+    return ''
 
 
 async def open_online_resume_greeting(tab):
