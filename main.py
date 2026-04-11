@@ -1,5 +1,6 @@
 import os, argparse, asyncio, glob, subprocess
 import commentjson as json
+from random import gauss
 from openai import OpenAI
 
 import zendriver as zd
@@ -52,11 +53,11 @@ def get_params():
         return [config] if not isinstance(config, list) else config
 
 def clear_chrome_locks():
-    subprocess.run(["pkill", "-9", "-f", "chrome_dev_test"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", "chrome_user_data"], capture_output=True)
     patterns = [
-        '/tmp/chrome_dev_test/Singleton*',
-        '/tmp/chrome_dev_test/Default/Lock',
-        '/tmp/chrome_dev_test/Default/LOCK',
+        '/tmp/chrome_user_data/Singleton*',
+        '/tmp/chrome_user_data/Default/Lock',
+        '/tmp/chrome_user_data/Default/LOCK',
     ]
     for pattern in patterns:
         for f in glob.glob(pattern):
@@ -67,24 +68,20 @@ def clear_chrome_locks():
 
 async def launch_browser(url):
     clear_chrome_locks()
-    await asyncio.sleep(1)
+    await asyncio.sleep(max(1 + gauss(0, 0.25), 0.3))
     browser = await zd.start(
         headless=False,
-        user_data_dir='/tmp/chrome_dev_test',
+        user_data_dir='/tmp/chrome_user_data',
         browser_args=[
-            '--disable-web-security',
-            '--disable-features=VizDisplayCompositor',
-            '--allow-running-insecure-content',
             '--disable-dev-shm-usage',
             '--disable-notifications',
-            '--allow-cross-origin-auth-prompt',
             '--window-size=1920,1080',
         ],
         browser_connection_timeout=1.0,
         browser_connection_max_tries=15,
     )
     tab = await browser.get(url)
-    await asyncio.sleep(2)
+    await asyncio.sleep(max(2 + gauss(0, 0.5), 0.6))
     return browser, tab
 
 

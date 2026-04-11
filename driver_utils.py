@@ -1,8 +1,21 @@
 import asyncio
+import base64
 import json
 from log_utils import logger
 import re
 from random import gauss
+from zendriver import cdp
+
+
+def jitter(mu: float, sigma: float | None = None) -> float:
+    """Return a normally-distributed sleep duration centered on mu (sigma defaults to 25% of mu).
+
+    Always returns a positive value: at least max(0.1, mu * 0.3).
+    """
+    if sigma is None:
+        sigma = mu * 0.25
+    floor = max(0.1, mu * 0.3)
+    return max(mu + gauss(0, sigma), floor)
 
 
 
@@ -45,7 +58,7 @@ async def _frame_xpath_click(tab, xpath):
 
 async def log_in(tab):
     await tab.get('https://www.zhipin.com/web/user/?intent=1')
-    await asyncio.sleep(3)
+    await asyncio.sleep(jitter(3))
     results = await tab.xpath('//*[@id="wrap"]/div/div[2]/div[2]/div[1]')
     if results:
         await results[0].click()
@@ -61,7 +74,7 @@ async def log_in(tab):
         logger.warning("Login timeout")
 
     logger.info("Logged in.")
-    await asyncio.sleep(3)
+    await asyncio.sleep(jitter(3))
 
 
 async def ensure_list_view(tab):
@@ -90,7 +103,7 @@ async def goto_recommend(tab):
         if found:
             break
         await asyncio.sleep(0.5)
-    await asyncio.sleep(2)
+    await asyncio.sleep(jitter(2))
 
 
 async def get_resume_card_text(tab, idx) -> str:
@@ -116,7 +129,7 @@ async def is_viewed(tab, idx) -> bool:
     if result is None:
         logger.warning(f"#{idx} 加载失败。")
         await scroll_down(tab)
-        await asyncio.sleep(3)
+        await asyncio.sleep(jitter(3))
         return False
     return 'has-viewed' in str(result)
 
@@ -137,38 +150,160 @@ async def get_age(tab, idx) -> int:
 
 RESUME_LOAD_TIMEOUT = 10  # seconds to wait for resume canvas to appear
 
+# Injected into the c-resume iframe HTML to force CORS mode on all <img> loads.
+# Combined with adding Access-Control-Allow-Origin: * to image responses via Fetch
+# interception, this prevents canvas taint so toDataURL() works without
+# --disable-web-security (which triggers bot detection).
+_CROSSORIGIN_INJECT = """<script>
+(function() {
+    var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    if (d && d.set) {
+        Object.defineProperty(HTMLImageElement.prototype, 'src', {
+            set: function(v) { if (!this.crossOrigin) this.crossOrigin = 'anonymous'; d.set.call(this, v); },
+            get: d.get, configurable: true
+        });
+    }
+    var Orig = window.Image;
+    window.Image = function(w, h) { var img = new Orig(w, h); img.crossOrigin = 'anonymous'; return img; };
+    window.Image.prototype = Orig.prototype;
+})();
+</script>"""
 
-async def _get_canvas_base64(tab):
-    return await tab.evaluate("""
-        (function() {
-            var frame = document.querySelector('iframe[name="recommendFrame"]');
-            if (!frame) return null;
-            try {
-                var doc = frame.contentDocument;
-                var cFrame = doc.querySelector('iframe[src*="c-resume"]');
-                if (cFrame) {
-                    var canvas = cFrame.contentDocument.querySelector('canvas#resume');
-                    if (canvas) return canvas.toDataURL('image/png').substring(22);
-                }
-                // fallback: canvas directly in recommend frame
-                var canvas = doc.querySelector('canvas#resume');
-                if (canvas) return canvas.toDataURL('image/png').substring(22);
-            } catch(e) {}
-            return null;
-        })()
-    """)
+
+async def _get_c_resume_frame_ids(tab) -> list:
+    """Return all c-resume frame IDs in tree order (oldest first)."""
+    frame_tree = await tab.send(cdp.page.get_frame_tree())
+    result = []
+    def walk(node):
+        if 'c-resume' in (node.frame.url or ''):
+            result.append(node.frame.id_)
+        for child in (node.child_frames or []):
+            walk(child)
+    walk(frame_tree)
+    return result
+
+
+async def _read_canvas_b64(tab, frame_id) -> str | None:
+    """Try canvas.toDataURL() inside frame_id. Returns None if canvas absent or tainted."""
+    ctx_id = await tab.send(cdp.page.create_isolated_world(
+        frame_id=frame_id, world_name='canvas_read'
+    ))
+    result, exc = await tab.send(cdp.runtime.evaluate(
+        expression="""
+            (function() {
+                var c = document.querySelector('canvas#resume');
+                if (!c) return null;
+                try { return c.toDataURL('image/png').substring(22); }
+                catch(e) { return null; }
+            })()
+        """,
+        context_id=ctx_id,
+        return_by_value=True,
+    ))
+    if exc or not result or not result.value:
+        return None
+    return result.value
+
+
+async def _enable_cors_intercept(tab):
+    """Enable Fetch interception to un-taint the resume canvas.
+
+    Intercepts:
+    - c-resume HTML responses: injects a <script> that sets crossOrigin='anonymous'
+      on all <img> elements before their src is assigned.
+    - Image responses: adds Access-Control-Allow-Origin: * so the browser accepts
+      the CORS response and does not taint the canvas.
+    """
+    async def _handle_paused(evt: cdp.fetch.RequestPaused):
+        req_id = evt.request_id
+        status_code = evt.response_status_code
+
+        if status_code is None:
+            await tab.send(cdp.fetch.continue_request(request_id=req_id))
+            return
+
+        resource_type = evt.resource_type
+
+        if resource_type == cdp.network.ResourceType.DOCUMENT and 'c-resume' in evt.request.url:
+            body, b64_enc = await tab.send(cdp.fetch.get_response_body(request_id=req_id))
+            if b64_enc:
+                body = base64.b64decode(body).decode('utf-8', errors='replace')
+            body = body.replace('<head>', '<head>' + _CROSSORIGIN_INJECT, 1)
+            await tab.send(cdp.fetch.fulfill_request(
+                request_id=req_id,
+                response_code=status_code,
+                response_headers=evt.response_headers,
+                body=base64.b64encode(body.encode('utf-8')).decode(),
+            ))
+
+        elif resource_type == cdp.network.ResourceType.IMAGE:
+            body, b64_enc = await tab.send(cdp.fetch.get_response_body(request_id=req_id))
+            if not b64_enc:
+                body = base64.b64encode(body.encode()).decode()
+            headers = [
+                h for h in (evt.response_headers or [])
+                if h.name.lower() != 'access-control-allow-origin'
+            ]
+            headers.append(cdp.fetch.HeaderEntry(name='Access-Control-Allow-Origin', value='*'))
+            await tab.send(cdp.fetch.fulfill_request(
+                request_id=req_id,
+                response_code=status_code,
+                response_headers=headers,
+                body=body,
+            ))
+
+        else:
+            await tab.send(cdp.fetch.continue_response(
+                request_id=req_id,
+                response_code=status_code,
+                response_headers=evt.response_headers,
+            ))
+
+    tab.add_handler(cdp.fetch.RequestPaused, _handle_paused)
+    await tab.send(cdp.fetch.enable(patterns=[
+        cdp.fetch.RequestPattern(
+            url_pattern='*c-resume*',
+            resource_type=cdp.network.ResourceType.DOCUMENT,
+            request_stage=cdp.fetch.RequestStage.RESPONSE,
+        ),
+        cdp.fetch.RequestPattern(
+            url_pattern='*',
+            resource_type=cdp.network.ResourceType.IMAGE,
+            request_stage=cdp.fetch.RequestStage.RESPONSE,
+        ),
+    ]))
+
+
+async def _disable_cors_intercept(tab):
+    tab.remove_handlers(cdp.fetch.RequestPaused)
+    await tab.send(cdp.fetch.disable())
 
 
 async def get_resume(tab, idx) -> tuple[str | None, str]:
-    await asyncio.sleep(max(2 + gauss(0, 1), 1))
-    await _frame_xpath_click(tab, xpath_resume_card.format(i=idx))
+    await asyncio.sleep(jitter(2))
 
-    # Poll until canvas appears; overall timeout is enforced by asyncio.wait_for() in the caller
-    while True:
-        canvas_base64 = await _get_canvas_base64(tab)
-        if canvas_base64 is not None:
-            break
-        await asyncio.sleep(1)
+    # Snapshot existing c-resume frames before clicking so we can identify the new one.
+    # The recommend page stacks c-resume iframes rather than reusing them, so the
+    # currently visible resume is always the newest frame, not the first one.
+    existing_fids = set(await _get_c_resume_frame_ids(tab))
+
+    await _enable_cors_intercept(tab)
+    try:
+        await _frame_xpath_click(tab, xpath_resume_card.format(i=idx))
+
+        # Poll until canvas is ready; timeout enforced by asyncio.wait_for() in caller
+        while True:
+            all_fids = await _get_c_resume_frame_ids(tab)
+            new_fids = [f for f in all_fids if f not in existing_fids]
+            # Prefer the newly created frame; fall back to the last known one
+            fid = new_fids[-1] if new_fids else (all_fids[-1] if all_fids else None)
+            if fid:
+                canvas_base64 = await _read_canvas_b64(tab, fid)
+                if canvas_base64 is not None:
+                    break
+            await asyncio.sleep(1)
+    finally:
+        await _disable_cors_intercept(tab)
 
     # Extract the "经历概览" sidebar text from the recommendFrame DOM
     overview_text = await _in_frame(tab, """
@@ -180,9 +315,9 @@ async def get_resume(tab, idx) -> tuple[str | None, str]:
 
 
 async def say_hi(tab):
-    await asyncio.sleep(1)
+    await asyncio.sleep(jitter(1))
     await _frame_xpath_click(tab, xpath_say_hi)
-    await asyncio.sleep(1)
+    await asyncio.sleep(jitter(1))
     try:
         await _frame_xpath_click(tab, xpath_i_know_after_say_hi)
     except Exception:
@@ -190,12 +325,12 @@ async def say_hi(tab):
 
 
 async def close_resume(tab):
-    await asyncio.sleep(1)
+    await asyncio.sleep(jitter(1))
     await _frame_xpath_click(tab, xpath_resume_close)
 
 
 async def scroll_down(tab):
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(jitter(0.5))
     await _in_frame(tab, "win.scrollTo(0, win.scrollY + 180);")
 
 
@@ -204,7 +339,7 @@ async def select_job_position(tab, job_title):
         var dropdown = doc.querySelector('.ui-dropmenu-label');
         if (dropdown) dropdown.click();
     """)
-    await asyncio.sleep(1)
+    await asyncio.sleep(jitter(1))
 
     found = await _in_frame(tab, f"""
         var options = Array.from(doc.querySelectorAll('ul.job-list li.job-item'));
@@ -218,7 +353,7 @@ async def select_job_position(tab, job_title):
     """)
     if found:
         logger.info(f"Selected job: {job_title}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(jitter(5))
         await ensure_list_view(tab)
     else:
         logger.warning(f"No job found starting with: {job_title}")
@@ -240,7 +375,7 @@ async def goto_new_greetings(tab) -> int:
     or 0 if no badge is shown.
     """
     await tab.get('https://www.zhipin.com/web/chat/index')
-    await asyncio.sleep(2)
+    await asyncio.sleep(jitter(2))
     link = await tab.find("新招呼")
     # The count lives in <em class="num"> inside the same <span class="content">,
     # so link.text (direct text node only) won't include it — query the DOM directly.
@@ -262,11 +397,11 @@ async def goto_new_greetings(tab) -> int:
         })()
     """) or 0
     await link.click()
-    await asyncio.sleep(2)
+    await asyncio.sleep(jitter(2))
     # Click 未读 to show only unread candidates
     unread_tab = await tab.find("未读")
     await unread_tab.click()
-    await asyncio.sleep(1)
+    await asyncio.sleep(jitter(1))
     return count
 
 
@@ -299,7 +434,7 @@ async def open_greeting_at(tab, idx):
     items = await tab.xpath(xpath_greeting_items)
     if idx <= len(items):
         await items[idx - 1].click()
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(jitter(1.5))
 
 
 CHAT_PANEL_LOAD_TIMEOUT = 10  # seconds to wait for chat panel .position-name to appear
@@ -326,31 +461,33 @@ async def get_current_chat_job_title(tab) -> str:
 
 
 async def open_online_resume_greeting(tab):
-    """Click 在线简历 button in the chat panel header."""
+    """Click 在线简历 button in the chat panel header.
+
+    Enables Fetch CORS intercept before clicking so the c-resume iframe loads
+    with untainted canvas from the start. Caller must ensure get_online_resume_greeting()
+    is called afterwards (it disables the intercept on exit).
+    """
+    await _enable_cors_intercept(tab)
     btn = await tab.find("在线简历")
     await btn.click()
-    await asyncio.sleep(2)
+    await asyncio.sleep(jitter(2))
 
 
 async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
-    """Wait for canvas resume and return (base64_png, overview_text)."""
-    while True:
-        canvas_b64 = await tab.evaluate("""
-            (function() {
-                var f = document.querySelector('iframe[src*="c-resume"]');
-                if (f) {
-                    try {
-                        var c = f.contentDocument.querySelector('canvas#resume');
-                        if (c) return c.toDataURL('image/png').substring(22);
-                    } catch(e) {}
-                }
-                var c = document.querySelector('canvas#resume');
-                return c ? c.toDataURL('image/png').substring(22) : null;
-            })()
-        """)
-        if canvas_b64 is not None:
-            break
-        await asyncio.sleep(1)
+    """Wait for canvas resume and return (base64_png, overview_text).
+
+    Disables the Fetch CORS intercept (set up by open_online_resume_greeting) on exit.
+    """
+    try:
+        while True:
+            fids = await _get_c_resume_frame_ids(tab)
+            if fids:
+                canvas_b64 = await _read_canvas_b64(tab, fids[-1])
+                if canvas_b64 is not None:
+                    break
+            await asyncio.sleep(1)
+    finally:
+        await _disable_cors_intercept(tab)
 
     overview_text = await tab.evaluate("""
         (function() {
@@ -363,7 +500,7 @@ async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
 
 async def close_online_resume_greeting(tab):
     """Close the online resume modal via .boss-popup__close (click handler is on the div, not the i)."""
-    await asyncio.sleep(max(2 + gauss(0, 1), 1))
+    await asyncio.sleep(jitter(2))
     await tab.evaluate("""
         (function() {
             var btn = document.querySelector('.boss-popup__close');
@@ -401,10 +538,10 @@ async def send_chat_message(tab, text: str):
             ed.dispatchEvent(new Event('input', {{bubbles: true}}));
         }})()
     """)
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(jitter(0.5))
     send_btn = await tab.find("发送")
     await send_btn.click()
-    await asyncio.sleep(1)
+    await asyncio.sleep(jitter(1))
 
 
 async def request_resume(tab):
@@ -440,7 +577,7 @@ async def mark_unsuitable(tab, reason_category: str):
             raise RuntimeError("Could not find 不合适 button")
         coords = json.loads(pos)
         await tab.mouse_click(coords['x'], coords['y'])
-        await asyncio.sleep(2)
+        await asyncio.sleep(jitter(2))
 
     # Wait until the specific reason item we need is in the DOM (items may load in batches)
     escaped = reason_category.replace("'", "\\'")
@@ -475,7 +612,7 @@ async def mark_unsuitable(tab, reason_category: str):
     if not clicked_reason or clicked_reason.startswith('NOT_FOUND:'):
         available = clicked_reason[len('NOT_FOUND:'):] if clicked_reason else '(empty)'
         raise RuntimeError(f"Could not find reason button: {reason_category!r}, available: {available}")
-    await asyncio.sleep(1)
+    await asyncio.sleep(jitter(1))
 
     # Confirm if a confirm button appears
     await tab.evaluate("""
@@ -489,7 +626,7 @@ async def mark_unsuitable(tab, reason_category: str):
             return false;
         })()
     """)
-    await asyncio.sleep(1)
+    await asyncio.sleep(jitter(1))
 
 
 async def close_popover(tab):
