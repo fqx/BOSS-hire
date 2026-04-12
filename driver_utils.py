@@ -56,6 +56,82 @@ async def _frame_xpath_click(tab, xpath):
     """)
 
 
+async def _mouse_click_css(tab, selector: str) -> bool:
+    """Click a main-page element by CSS selector using a real CDP mouse event (isTrusted=true).
+    Returns True if element was found and clicked."""
+    pos = await tab.evaluate(f"""
+        (function() {{
+            var el = document.querySelector({repr(selector)});
+            if (!el) return null;
+            var r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) return null;
+            return JSON.stringify({{x: r.left + r.width / 2, y: r.top + r.height / 2}});
+        }})()
+    """)
+    if not pos:
+        return False
+    coords = json.loads(pos)
+    await tab.mouse_click(coords['x'], coords['y'])
+    return True
+
+
+async def _frame_mouse_click_xpath(tab, xpath: str) -> bool:
+    """Click a recommendFrame element by XPath using a real CDP mouse event (isTrusted=true).
+    Scrolls the element into view first so getBoundingClientRect() returns in-viewport coords.
+    Returns True if element was found and clicked."""
+    pos = await tab.evaluate(f"""
+        (function() {{
+            var frame = document.querySelector('iframe[name="recommendFrame"]');
+            if (!frame) return null;
+            var frameRect = frame.getBoundingClientRect();
+            var doc = frame.contentDocument;
+            if (!doc) return null;
+            var res = doc.evaluate({repr(xpath)}, doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+            var el = res.singleNodeValue;
+            if (!el) return null;
+            el.scrollIntoView({{block: 'center', behavior: 'instant'}});
+            var r = el.getBoundingClientRect();
+            return JSON.stringify({{
+                x: frameRect.left + r.left + r.width / 2,
+                y: frameRect.top + r.top + r.height / 2
+            }});
+        }})()
+    """)
+    if not pos:
+        return False
+    coords = json.loads(pos)
+    await tab.mouse_click(coords['x'], coords['y'])
+    return True
+
+
+async def _frame_mouse_click_css(tab, selector: str) -> bool:
+    """Click a recommendFrame element by CSS selector using a real CDP mouse event (isTrusted=true).
+    Scrolls the element into view first so getBoundingClientRect() returns in-viewport coords.
+    Returns True if element was found and clicked."""
+    pos = await tab.evaluate(f"""
+        (function() {{
+            var frame = document.querySelector('iframe[name="recommendFrame"]');
+            if (!frame) return null;
+            var frameRect = frame.getBoundingClientRect();
+            var doc = frame.contentDocument;
+            if (!doc) return null;
+            var el = doc.querySelector({repr(selector)});
+            if (!el) return null;
+            el.scrollIntoView({{block: 'center', behavior: 'instant'}});
+            var r = el.getBoundingClientRect();
+            return JSON.stringify({{
+                x: frameRect.left + r.left + r.width / 2,
+                y: frameRect.top + r.top + r.height / 2
+            }});
+        }})()
+    """)
+    if not pos:
+        return False
+    coords = json.loads(pos)
+    await tab.mouse_click(coords['x'], coords['y'])
+    return True
+
+
 async def log_in(tab):
     await tab.get('https://www.zhipin.com/web/user/?intent=1')
     await asyncio.sleep(jitter(3))
@@ -79,17 +155,29 @@ async def log_in(tab):
 
 async def ensure_list_view(tab):
     """Switch candidate list to list view if it is currently in grid view."""
-    await _in_frame(tab, """
-        var uses = doc.querySelectorAll('.mode-item use');
-        for (var i = 0; i < uses.length; i++) {
-            var href = uses[i].getAttribute('xlink:href') || uses[i].getAttribute('href') || '';
-            if (href.indexOf('mode1') !== -1) {
-                var btn = uses[i].closest('.mode-item');
-                if (btn && !btn.classList.contains('curr')) btn.click();
-                break;
+    pos = await tab.evaluate("""
+        (function() {
+            var frame = document.querySelector('iframe[name="recommendFrame"]');
+            if (!frame) return null;
+            var frameRect = frame.getBoundingClientRect();
+            var doc = frame.contentDocument;
+            if (!doc) return null;
+            var uses = doc.querySelectorAll('.mode-item use');
+            for (var i = 0; i < uses.length; i++) {
+                var href = uses[i].getAttribute('xlink:href') || uses[i].getAttribute('href') || '';
+                if (href.indexOf('mode1') !== -1) {
+                    var btn = uses[i].closest('.mode-item');
+                    if (!btn || btn.classList.contains('curr')) return null;
+                    var r = btn.getBoundingClientRect();
+                    return JSON.stringify({x: frameRect.left + r.left + r.width / 2, y: frameRect.top + r.top + r.height / 2});
+                }
             }
-        }
+            return null;
+        })()
     """)
+    if pos:
+        coords = json.loads(pos)
+        await tab.mouse_click(coords['x'], coords['y'])
 
 
 async def goto_recommend(tab):
@@ -289,7 +377,7 @@ async def get_resume(tab, idx) -> tuple[str | None, str]:
 
     await _enable_cors_intercept(tab)
     try:
-        await _frame_xpath_click(tab, xpath_resume_card.format(i=idx))
+        await _frame_mouse_click_xpath(tab, xpath_resume_card.format(i=idx))
 
         # Poll until canvas is ready; timeout enforced by asyncio.wait_for() in caller
         while True:
@@ -316,17 +404,42 @@ async def get_resume(tab, idx) -> tuple[str | None, str]:
 
 async def say_hi(tab):
     await asyncio.sleep(jitter(1))
-    await _frame_xpath_click(tab, xpath_say_hi)
+    # Use real mouse click (isTrusted=true) to avoid bot detection.
+    # The greet button is inside the recommendFrame iframe, so we combine
+    # the iframe's page offset with the button's offset within the iframe.
+    pos = await tab.evaluate("""
+        (function() {
+            var frame = document.querySelector('iframe[name="recommendFrame"]');
+            if (!frame) return null;
+            var frameRect = frame.getBoundingClientRect();
+            var doc = frame.contentDocument;
+            if (!doc) return null;
+            var res = doc.evaluate(
+                '//button[starts-with(@class, "btn-v2 btn-sure-v2 btn-greet")]',
+                doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+            );
+            var btn = res.singleNodeValue;
+            if (!btn) return null;
+            var btnRect = btn.getBoundingClientRect();
+            return JSON.stringify({
+                x: frameRect.left + btnRect.left + btnRect.width / 2,
+                y: frameRect.top + btnRect.top + btnRect.height / 2
+            });
+        })()
+    """)
+    if pos:
+        coords = json.loads(pos)
+        await tab.mouse_click(coords['x'], coords['y'])
+    else:
+        # Fallback if iframe/button not found
+        await _frame_mouse_click_xpath(tab, xpath_say_hi)
     await asyncio.sleep(jitter(1))
-    try:
-        await _frame_xpath_click(tab, xpath_i_know_after_say_hi)
-    except Exception:
-        pass
+    await _frame_mouse_click_xpath(tab, xpath_i_know_after_say_hi)
 
 
 async def close_resume(tab):
     await asyncio.sleep(jitter(1))
-    await _frame_xpath_click(tab, xpath_resume_close)
+    await _frame_mouse_click_xpath(tab, xpath_resume_close)
 
 
 async def scroll_down(tab):
@@ -335,23 +448,30 @@ async def scroll_down(tab):
 
 
 async def select_job_position(tab, job_title):
-    await _in_frame(tab, """
-        var dropdown = doc.querySelector('.ui-dropmenu-label');
-        if (dropdown) dropdown.click();
-    """)
+    await _frame_mouse_click_css(tab, '.ui-dropmenu-label')
     await asyncio.sleep(jitter(1))
 
-    found = await _in_frame(tab, f"""
-        var options = Array.from(doc.querySelectorAll('ul.job-list li.job-item'));
-        for (var opt of options) {{
-            if (opt.textContent.trim().startsWith({repr(job_title)})) {{
-                opt.click();
-                return true;
+    pos = await tab.evaluate(f"""
+        (function() {{
+            var frame = document.querySelector('iframe[name="recommendFrame"]');
+            if (!frame) return null;
+            var frameRect = frame.getBoundingClientRect();
+            var doc = frame.contentDocument;
+            if (!doc) return null;
+            var options = Array.from(doc.querySelectorAll('ul.job-list li.job-item'));
+            for (var opt of options) {{
+                if (opt.textContent.trim().startsWith({repr(job_title)})) {{
+                    opt.scrollIntoView({{block: 'nearest'}});
+                    var r = opt.getBoundingClientRect();
+                    return JSON.stringify({{x: frameRect.left + r.left + r.width / 2, y: frameRect.top + r.top + r.height / 2}});
+                }}
             }}
-        }}
-        return false;
+            return null;
+        }})()
     """)
-    if found:
+    if pos:
+        coords = json.loads(pos)
+        await tab.mouse_click(coords['x'], coords['y'])
         logger.info(f"Selected job: {job_title}")
         await asyncio.sleep(jitter(5))
         await ensure_list_view(tab)
@@ -376,6 +496,7 @@ async def goto_new_greetings(tab) -> int:
     """
     await tab.get('https://www.zhipin.com/web/chat/index')
     await asyncio.sleep(jitter(2))
+    await dismiss_hover_panels(tab)
     link = await tab.find("新招呼")
     # The count lives in <em class="num"> inside the same <span class="content">,
     # so link.text (direct text node only) won't include it — query the DOM directly.
@@ -467,6 +588,10 @@ async def open_online_resume_greeting(tab):
     with untainted canvas from the start. Caller must ensure get_online_resume_greeting()
     is called afterwards (it disables the intercept on exit).
     """
+    # The 在线简历 button sits at ~(1438, 139) which falls inside the interview
+    # hover-panel's z-index:100 overlay (1093-1553, 50-205).  Move the mouse
+    # to a safe area first so the panel collapses before we try to click.
+    await dismiss_hover_panels(tab)
     await _enable_cors_intercept(tab)
     btn = await tab.find("在线简历")
     await btn.click()
@@ -501,13 +626,7 @@ async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
 async def close_online_resume_greeting(tab):
     """Close the online resume modal via .boss-popup__close (click handler is on the div, not the i)."""
     await asyncio.sleep(jitter(2))
-    await tab.evaluate("""
-        (function() {
-            var btn = document.querySelector('.boss-popup__close');
-            if (btn) { btn.click(); return true; }
-            return false;
-        })()
-    """)
+    await _mouse_click_css(tab, '.boss-popup__close')
     # Wait until modal is fully gone before returning — a fixed 1s sleep is not enough
     # when the close animation is slow or the click was missed.
     for _ in range(20):
@@ -555,8 +674,12 @@ async def mark_unsuitable(tab, reason_category: str):
     # skip the button click — clicking it again would submit the panel instead of keeping it open.
     panel_open = await tab.evaluate("""
         (function() {
+            // Vue preloads .reason-item elements inside a display:none container,
+            // so presence in DOM is not enough — check that items are actually visible.
             var items = document.querySelectorAll('.reason-item');
-            return items.length > 0;
+            if (items.length === 0) return false;
+            var r = items[0].getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
         })()
     """)
     if not panel_open:
@@ -595,52 +718,64 @@ async def mark_unsuitable(tab, reason_category: str):
             break
         await asyncio.sleep(0.3)
 
-    # Click reason item via innerText.trim() comparison (more robust than XPath normalize-space)
-    clicked_reason = await tab.evaluate(f"""
+    # Click reason item — get coords by text match, then use real mouse click
+    reason_pos = await tab.evaluate(f"""
         (function() {{
             var items = document.querySelectorAll('.reason-item');
             for (var item of items) {{
                 if (item.innerText.trim() === '{escaped}') {{
-                    item.click();
-                    return item.outerHTML.substring(0, 100);
+                    var r = item.getBoundingClientRect();
+                    return JSON.stringify({{x: r.left + r.width / 2, y: r.top + r.height / 2, found: item.outerHTML.substring(0, 100)}});
                 }}
             }}
             var available = Array.from(items).map(i => i.innerText.trim()).join(', ');
-            return 'NOT_FOUND:' + available;
+            return JSON.stringify({{found: null, available: available}});
         }})()
     """)
-    if not clicked_reason or clicked_reason.startswith('NOT_FOUND:'):
-        available = clicked_reason[len('NOT_FOUND:'):] if clicked_reason else '(empty)'
+    reason_data = json.loads(reason_pos) if reason_pos else {}
+    if not reason_data.get('found'):
+        available = reason_data.get('available', '(empty)')
         raise RuntimeError(f"Could not find reason button: {reason_category!r}, available: {available}")
+    await tab.mouse_click(reason_data['x'], reason_data['y'])
     await asyncio.sleep(jitter(1))
 
-    # Confirm if a confirm button appears
-    await tab.evaluate("""
+    # Confirm if a confirm button appears — get coords then real mouse click
+    confirm_pos = await tab.evaluate("""
         (function() {
             var all = document.querySelectorAll('*');
             for (var el of all) {
                 if (el.children.length === 0 && el.innerText && el.innerText.trim() === '确定') {
-                    el.click(); return true;
+                    var r = el.getBoundingClientRect();
+                    if (r.width === 0 && r.height === 0) continue;
+                    return JSON.stringify({x: r.left + r.width / 2, y: r.top + r.height / 2});
                 }
             }
-            return false;
+            return null;
         })()
     """)
+    if confirm_pos:
+        coords = json.loads(confirm_pos)
+        await tab.mouse_click(coords['x'], coords['y'])
     await asyncio.sleep(jitter(1))
+
+
+async def dismiss_hover_panels(tab):
+    """Move mouse to a neutral area to dismiss CSS hover-triggered panels.
+
+    The top-right navigation bar contains hover-triggered panels (e.g. the
+    interview reminder panel with z-index 100).  After any action that may
+    leave the mouse near those nav-items, call this to ensure they collapse
+    before attempting clicks in the conversation area.
+    """
+    await tab.send(cdp.input_.dispatch_mouse_event(
+        type_='mouseMoved', x=300, y=700
+    ))
+    await asyncio.sleep(0.3)
 
 
 async def close_popover(tab):
     while True:
-        closed = await tab.evaluate("""
-            (function() {
-                var btn = document.querySelector('.iboss-close');
-                if (!btn) return false;
-                var rect = btn.getBoundingClientRect();
-                if (rect.width === 0 && rect.height === 0) return false;
-                btn.click();
-                return true;
-            })()
-        """)
-        if not closed:
+        clicked = await _mouse_click_css(tab, '.iboss-close')
+        if not clicked:
             break
         await asyncio.sleep(0.5)
