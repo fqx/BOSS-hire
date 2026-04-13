@@ -435,11 +435,18 @@ async def say_hi(tab):
         await _frame_mouse_click_xpath(tab, xpath_say_hi)
     await asyncio.sleep(jitter(1))
     await _frame_mouse_click_xpath(tab, xpath_i_know_after_say_hi)
+    # Move mouse away from the top-right nav area to prevent the avatar hover
+    # panel from staying open and intercepting subsequent clicks.
+    await dismiss_hover_panels(tab)
 
 
 async def close_resume(tab):
     await asyncio.sleep(jitter(1))
     await _frame_mouse_click_xpath(tab, xpath_resume_close)
+    # Move mouse away from the top-right area: the close button (icon-close) lands
+    # at x≈1584 which is within the avatar dropdown trigger zone (x=1553-1644).
+    # Without this, the dropdown can stay open and catch the next click.
+    await dismiss_hover_panels(tab)
 
 
 async def scroll_down(tab):
