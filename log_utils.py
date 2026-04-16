@@ -54,7 +54,18 @@ for handler in logger.handlers[:]:
 tqdm_handler = TqdmLoggingHandler()
 tqdm_handler.setLevel(logging.INFO)
 tqdm_handler.addFilter(HttpSuccessFilter())
-console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+class ConsoleLlmFormatter(logging.Formatter):
+    """Same as default formatter but collapses newlines and truncates LLM-level messages."""
+    MAX_LLM_LEN = 80
+
+    def format(self, record):
+        if record.levelno == 35:  # LLM
+            record = logging.makeLogRecord(record.__dict__)
+            record.msg = record.getMessage().replace('\n', ' ')[:self.MAX_LLM_LEN]
+            record.args = None
+        return super().format(record)
+
+console_formatter = ConsoleLlmFormatter('%(asctime)s - %(levelname)s - %(message)s')
 tqdm_handler.setFormatter(console_formatter)
 logger.addHandler(tqdm_handler)
 
