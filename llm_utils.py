@@ -214,7 +214,8 @@ def _call_llm(client, resume_image_base64: str, resume_requirement: str, overvie
                 result = _call_responses_api(client, resume_image_base64, resume_requirement, overview_text)
             else:
                 result = _call_chat_api(client, resume_image_base64, resume_requirement, overview_text)
-            logger.llm(f"{result.is_qualified} - {result.reason:50}")
+            reason_summary = result.reason.replace('\n', ' ')[:80]
+            logger.llm(f"{result.is_qualified} - {reason_summary}")
             return result
         except Timeout:
             logger.warning("LLM API request timed out")
