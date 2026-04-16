@@ -7,6 +7,10 @@ from random import gauss
 from zendriver import cdp
 
 
+class DailyGreetingLimitReached(Exception):
+    """Raised when the platform's daily greeting quota for the current job is exhausted."""
+
+
 def jitter(mu: float, sigma: float | None = None) -> float:
     """Return a normally-distributed sleep duration centered on mu (sigma defaults to 25% of mu).
 
@@ -434,6 +438,22 @@ async def say_hi(tab):
         # Fallback if iframe/button not found
         await _frame_mouse_click_xpath(tab, xpath_say_hi)
     await asyncio.sleep(jitter(1))
+
+    # Check if the daily limit dialog appeared instead of the normal "知道了" prompt.
+    # The platform shows a purchase dialog with ".dialog-wrap.active" containing
+    # "今日沟通数已达上限" when the quota is exhausted.
+    limit_hit = await tab.evaluate("""
+        (function() {
+            var d = document.querySelector('.dialog-wrap.active');
+            return d ? d.innerText.includes('\u4eca\u65e5\u6c9f\u901a\u6570\u5df2\u8fbe\u4e0a\u9650') : false;
+        })()
+    """)
+    if limit_hit:
+        logger.warning("今日沟通数已达上限，关闭对话框并跳过当前职位。")
+        await _mouse_click_css(tab, '.boss-popup__close')
+        await asyncio.sleep(0.5)
+        raise DailyGreetingLimitReached("今日沟通数已达上限")
+
     await _frame_mouse_click_xpath(tab, xpath_i_know_after_say_hi)
     # Move mouse away from the top-right nav area to prevent the avatar hover
     # panel from staying open and intercepting subsequent clicks.

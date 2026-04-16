@@ -291,7 +291,12 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
 
                                     if is_qualified:
                                         logger.info(f"#{idx} 符合要求，打招呼。")
-                                        await driver_utils.say_hi(tab)
+                                        try:
+                                            await driver_utils.say_hi(tab)
+                                        except driver_utils.DailyGreetingLimitReached:
+                                            logger.warning(f"当前职位今日打招呼已达上限，停止处理：{job_title}")
+                                            await driver_utils.close_resume(tab)
+                                            break
                                         greeted += 1
                                         update_job_stats(job_title, viewed, greeted)
                                     else:
