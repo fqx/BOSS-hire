@@ -5,6 +5,7 @@ from log_utils import logger
 import re
 from random import gauss
 from zendriver import cdp
+from zendriver.core.connection import ProtocolException
 
 
 class DailyGreetingLimitReached(Exception):
@@ -310,46 +311,49 @@ async def _enable_cors_intercept(tab):
         req_id = evt.request_id
         status_code = evt.response_status_code
 
-        if status_code is None:
-            await tab.send(cdp.fetch.continue_request(request_id=req_id))
+        try:
+            if status_code is None:
+                await tab.send(cdp.fetch.continue_request(request_id=req_id))
+                return
+
+            resource_type = evt.resource_type
+
+            if resource_type == cdp.network.ResourceType.DOCUMENT and 'c-resume' in evt.request.url:
+                body, b64_enc = await tab.send(cdp.fetch.get_response_body(request_id=req_id))
+                if b64_enc:
+                    body = base64.b64decode(body).decode('utf-8', errors='replace')
+                body = body.replace('<head>', '<head>' + _CROSSORIGIN_INJECT, 1)
+                await tab.send(cdp.fetch.fulfill_request(
+                    request_id=req_id,
+                    response_code=status_code,
+                    response_headers=evt.response_headers,
+                    body=base64.b64encode(body.encode('utf-8')).decode(),
+                ))
+
+            elif resource_type == cdp.network.ResourceType.IMAGE:
+                body, b64_enc = await tab.send(cdp.fetch.get_response_body(request_id=req_id))
+                if not b64_enc:
+                    body = base64.b64encode(body.encode()).decode()
+                headers = [
+                    h for h in (evt.response_headers or [])
+                    if h.name.lower() != 'access-control-allow-origin'
+                ]
+                headers.append(cdp.fetch.HeaderEntry(name='Access-Control-Allow-Origin', value='*'))
+                await tab.send(cdp.fetch.fulfill_request(
+                    request_id=req_id,
+                    response_code=status_code,
+                    response_headers=headers,
+                    body=body,
+                ))
+
+            else:
+                await tab.send(cdp.fetch.continue_response(
+                    request_id=req_id,
+                    response_code=status_code,
+                    response_headers=evt.response_headers,
+                ))
+        except ProtocolException:
             return
-
-        resource_type = evt.resource_type
-
-        if resource_type == cdp.network.ResourceType.DOCUMENT and 'c-resume' in evt.request.url:
-            body, b64_enc = await tab.send(cdp.fetch.get_response_body(request_id=req_id))
-            if b64_enc:
-                body = base64.b64decode(body).decode('utf-8', errors='replace')
-            body = body.replace('<head>', '<head>' + _CROSSORIGIN_INJECT, 1)
-            await tab.send(cdp.fetch.fulfill_request(
-                request_id=req_id,
-                response_code=status_code,
-                response_headers=evt.response_headers,
-                body=base64.b64encode(body.encode('utf-8')).decode(),
-            ))
-
-        elif resource_type == cdp.network.ResourceType.IMAGE:
-            body, b64_enc = await tab.send(cdp.fetch.get_response_body(request_id=req_id))
-            if not b64_enc:
-                body = base64.b64encode(body.encode()).decode()
-            headers = [
-                h for h in (evt.response_headers or [])
-                if h.name.lower() != 'access-control-allow-origin'
-            ]
-            headers.append(cdp.fetch.HeaderEntry(name='Access-Control-Allow-Origin', value='*'))
-            await tab.send(cdp.fetch.fulfill_request(
-                request_id=req_id,
-                response_code=status_code,
-                response_headers=headers,
-                body=body,
-            ))
-
-        else:
-            await tab.send(cdp.fetch.continue_response(
-                request_id=req_id,
-                response_code=status_code,
-                response_headers=evt.response_headers,
-            ))
 
     tab.add_handler(cdp.fetch.RequestPaused, _handle_paused)
     await tab.send(cdp.fetch.enable(patterns=[
