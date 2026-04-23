@@ -121,9 +121,9 @@ _is_openai_cloud = (
     not any(h in _base_url for h in _local_hosts)
     and LLM_MODEL.lower().startswith("gpt")
 )
-MAX_OUTPUT_TOKENS = 1400  # for Responses API (cloud)
-# Chat Completions API: thinking tokens are hidden, visible output is small JSON
-MAX_TOKENS_CHAT = 2800
+_max_tokens_env = os.getenv("MAX_TOKENS")
+MAX_OUTPUT_TOKENS = int(_max_tokens_env) if _max_tokens_env else 1400  # for Responses API (cloud)
+MAX_TOKENS_CHAT = int(_max_tokens_env) if _max_tokens_env else 2800    # Chat Completions API (local)
 
 
 def _build_user_text(resume_requirement: str, overview_text: str) -> str:
