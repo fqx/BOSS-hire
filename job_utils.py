@@ -184,7 +184,6 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict, total:
                         driver_utils.get_online_resume_greeting(tab),
                         timeout=driver_utils.GREETING_RESUME_LOAD_TIMEOUT,
                     )
-                    await driver_utils.close_online_resume_greeting(tab)
                 except (TimeoutError, Exception) as e:
                     logger.warning(f"在线简历加载失败，跳过：{e}")
                     idx += 1
@@ -194,6 +193,7 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict, total:
                 result = llm_utils.is_qualified_result(
                     client, canvas_b64, requirements['cv_requirements'], overview_text
                 )
+                await driver_utils.close_online_resume_greeting(tab)
 
                 if result is None:
                     logger.warning("LLM 调用失败，跳过")
