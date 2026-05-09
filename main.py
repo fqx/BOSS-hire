@@ -15,6 +15,9 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL')
 
+ENABLE_GREETINGS_LOOP = os.getenv('ENABLE_GREETINGS_LOOP', 'true').lower() != 'false'
+ENABLE_RECOMMEND_LOOP = os.getenv('ENABLE_RECOMMEND_LOOP', 'true').lower() != 'false'
+
 # Initialize OpenAI client with timeout
 if OPENAI_BASE_URL:
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL, timeout=60.0)
@@ -98,14 +101,20 @@ async def main():
         # Process each job configuration with WakeLock to prevent system sleep
         with wakelock_utils.WakeLock():
             # Phase 1: inbound greeting candidates (新招呼)
-            greeting_count = await driver_utils.goto_new_greetings(tab)
-            if greeting_count > 0:
-                await job_utils.loop_greetings(tab, job_configs, client, job_stats, total=greeting_count)
+            if ENABLE_GREETINGS_LOOP:
+                greeting_count = await driver_utils.goto_new_greetings(tab)
+                if greeting_count > 0:
+                    await job_utils.loop_greetings(tab, job_configs, client, job_stats, total=greeting_count)
+                else:
+                    log_utils.logger.info("新招呼为空，跳过。")
+                await driver_utils.close_popover(tab)
             else:
-                log_utils.logger.info("新招呼为空，跳过。")
-            await driver_utils.close_popover(tab)
+                log_utils.logger.info("新招呼处理已禁用（ENABLE_GREETINGS_LOOP=false）。")
 
             # Phase 2: outbound recommendation screening (推荐牛人)
+            if not ENABLE_RECOMMEND_LOOP:
+                log_utils.logger.info("推荐牛人处理已禁用（ENABLE_RECOMMEND_LOOP=false）。")
+                return
             await driver_utils.goto_recommend(tab)
             for params in job_configs:
                 job_title = params['job_title']
