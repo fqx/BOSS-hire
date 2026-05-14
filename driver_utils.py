@@ -82,7 +82,7 @@ async def _mouse_click_css(tab, selector: str, warn: bool = True) -> bool:
     return True
 
 
-async def _frame_mouse_click_xpath(tab, xpath: str) -> bool:
+async def _frame_mouse_click_xpath(tab, xpath: str, warn: bool = True) -> bool:
     """Click a recommendFrame element by XPath using a real CDP mouse event (isTrusted=true).
     Scrolls the element into view first so getBoundingClientRect() returns in-viewport coords.
     Returns True if element was found and clicked."""
@@ -105,7 +105,8 @@ async def _frame_mouse_click_xpath(tab, xpath: str) -> bool:
         }})()
     """)
     if not pos:
-        logger.warning("_frame_mouse_click_xpath: element not found: %s", xpath)
+        if warn:
+            logger.warning("_frame_mouse_click_xpath: element not found: %s", xpath)
         return False
     coords = json.loads(pos)
     await tab.mouse_click(coords['x'], coords['y'])
@@ -462,7 +463,7 @@ async def say_hi(tab):
         await asyncio.sleep(0.5)
         raise DailyGreetingLimitReached("今日沟通数已达上限")
 
-    await _frame_mouse_click_xpath(tab, xpath_i_know_after_say_hi)
+    await _frame_mouse_click_xpath(tab, xpath_i_know_after_say_hi, warn=False)
     # Move mouse away from the top-right nav area to prevent the avatar hover
     # panel from staying open and intercepting subsequent clicks.
     await dismiss_hover_panels(tab)
