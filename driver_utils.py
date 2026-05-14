@@ -29,7 +29,7 @@ xpath_resume_card_is_viewed = '//*[@id="recommend-list"]/div/ul/li[{i}]'
 xpath_resume_card = '//*[@id="recommend-list"]/div/ul/li[{i}]/div/div[1]'
 xpath_say_hi = '//button[starts-with(@class, "btn-v2 btn-sure-v2 btn-greet")]'
 xpath_i_know_after_say_hi = '//button[contains(text(),"知道了")]'
-xpath_resume_close = '//i[@class="icon-close"]'
+css_resume_close = '.close-btn'
 
 
 async def _in_frame(tab, js_body: str):
@@ -466,10 +466,10 @@ async def say_hi(tab):
 
 async def close_resume(tab):
     await asyncio.sleep(jitter(1))
-    await _frame_mouse_click_xpath(tab, xpath_resume_close)
-    # Move mouse away from the top-right area: the close button (icon-close) lands
-    # at x≈1584 which is within the avatar dropdown trigger zone (x=1553-1644).
-    # Without this, the dropdown can stay open and catch the next click.
+    await _frame_mouse_click_css(tab, css_resume_close)
+    # Move mouse away from the top-right area: the close button (.close-btn) lands
+    # near the avatar dropdown trigger zone; without this the dropdown can stay
+    # open and catch the next click.
     await dismiss_hover_panels(tab)
 
 
