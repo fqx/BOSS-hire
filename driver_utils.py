@@ -61,7 +61,7 @@ async def _frame_xpath_click(tab, xpath):
     """)
 
 
-async def _mouse_click_css(tab, selector: str) -> bool:
+async def _mouse_click_css(tab, selector: str, warn: bool = True) -> bool:
     """Click a main-page element by CSS selector using a real CDP mouse event (isTrusted=true).
     Returns True if element was found and clicked."""
     pos = await tab.evaluate(f"""
@@ -74,7 +74,8 @@ async def _mouse_click_css(tab, selector: str) -> bool:
         }})()
     """)
     if not pos:
-        logger.warning("_mouse_click_css: element not found: %s", selector)
+        if warn:
+            logger.warning("_mouse_click_css: element not found: %s", selector)
         return False
     coords = json.loads(pos)
     await tab.mouse_click(coords['x'], coords['y'])
@@ -809,7 +810,7 @@ async def dismiss_hover_panels(tab):
 
 async def close_popover(tab):
     while True:
-        clicked = await _mouse_click_css(tab, '.iboss-close')
+        clicked = await _mouse_click_css(tab, '.iboss-close', warn=False)
         if not clicked:
             break
         await asyncio.sleep(0.5)
