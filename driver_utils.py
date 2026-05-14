@@ -27,7 +27,7 @@ def jitter(mu: float, sigma: float | None = None) -> float:
 xpath_age = '//*[@id="recommend-list"]/div/ul/li[{i}]/div/div[1]/div[2]/div[2]/div'
 xpath_resume_card_is_viewed = '//*[@id="recommend-list"]/div/ul/li[{i}]'
 xpath_resume_card = '//*[@id="recommend-list"]/div/ul/li[{i}]/div/div[1]'
-xpath_say_hi = '//button[starts-with(@class, "btn-v2 btn-sure-v2 btn-greet")]'
+xpath_say_hi = '//button[contains(@class, "btn-sure-v2") and contains(@class, "btn-greet")]'
 xpath_i_know_after_say_hi = '//button[contains(text(),"知道了")]'
 css_resume_close = '.close-btn'
 
@@ -423,7 +423,7 @@ async def say_hi(tab):
             var doc = frame.contentDocument;
             if (!doc) return null;
             var res = doc.evaluate(
-                '//button[starts-with(@class, "btn-v2 btn-sure-v2 btn-greet")]',
+                '//button[contains(@class, "btn-sure-v2") and contains(@class, "btn-greet")]',
                 doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
             );
             var btn = res.singleNodeValue;
