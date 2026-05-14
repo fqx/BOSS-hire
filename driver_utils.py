@@ -74,6 +74,7 @@ async def _mouse_click_css(tab, selector: str) -> bool:
         }})()
     """)
     if not pos:
+        logger.warning("_mouse_click_css: element not found: %s", selector)
         return False
     coords = json.loads(pos)
     await tab.mouse_click(coords['x'], coords['y'])
@@ -103,6 +104,7 @@ async def _frame_mouse_click_xpath(tab, xpath: str) -> bool:
         }})()
     """)
     if not pos:
+        logger.warning("_frame_mouse_click_xpath: element not found: %s", xpath)
         return False
     coords = json.loads(pos)
     await tab.mouse_click(coords['x'], coords['y'])
@@ -131,6 +133,7 @@ async def _frame_mouse_click_css(tab, selector: str) -> bool:
         }})()
     """)
     if not pos:
+        logger.warning("_frame_mouse_click_css: element not found: %s", selector)
         return False
     coords = json.loads(pos)
     await tab.mouse_click(coords['x'], coords['y'])
