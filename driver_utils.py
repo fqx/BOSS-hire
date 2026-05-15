@@ -459,7 +459,7 @@ async def say_hi(tab):
     """)
     if limit_hit:
         logger.warning("今日沟通数已达上限，关闭对话框并跳过当前职位。")
-        await _mouse_click_css(tab, '.boss-popup__close')
+        await _mouse_click_css(tab, '.boss-popup__close', warn=False)
         await asyncio.sleep(0.5)
         raise DailyGreetingLimitReached("今日沟通数已达上限")
 
@@ -662,7 +662,7 @@ async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
 async def close_online_resume_greeting(tab):
     """Close the online resume modal via .boss-popup__close (click handler is on the div, not the i)."""
     await asyncio.sleep(jitter(2))
-    await _mouse_click_css(tab, '.boss-popup__close')
+    await _mouse_click_css(tab, '.boss-popup__close', warn=False)
     # Wait until modal is fully gone before returning — a fixed 1s sleep is not enough
     # when the close animation is slow or the click was missed.
     for _ in range(20):
