@@ -660,15 +660,14 @@ async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
 
 
 async def close_online_resume_greeting(tab):
-    """Close the online resume modal via .boss-popup__close (click handler is on the div, not the i)."""
+    """Close the online resume modal (.resume-common-dialog) via its main-page .close-btn."""
     await asyncio.sleep(jitter(2))
-    await _mouse_click_css(tab, '.boss-popup__close', warn=False)
-    # Wait until modal is fully gone before returning — a fixed 1s sleep is not enough
-    # when the close animation is slow or the click was missed.
+    await _mouse_click_css(tab, '.resume-common-dialog .close-btn')
+    # Wait until modal is fully gone before returning.
     for _ in range(20):
         still_open = await tab.evaluate("""
             (function() {
-                var el = document.querySelector('.boss-popup__close');
+                var el = document.querySelector('.resume-common-dialog .close-btn');
                 return el !== null && el.offsetParent !== null;
             })()
         """)
