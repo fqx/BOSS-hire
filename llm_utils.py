@@ -46,6 +46,11 @@ This is the first and most critical gate.
 ### Step 2: Sequential "Must-Have" Condition Check
 If the salary check was successful, now evaluate the mandatory requirements one by one, in the order they appear in the JD.
 - **Identifying "Must-Have" Conditions:** A condition is considered mandatory if it contains keywords like "需要" (need), "必须" (must), "硬性" (hard requirement), "要求" (require), "至少" (at least), "不低于" (no less than), "限定" (limited to), "仅限" (only for), "必备" (essential). Also, treat explicit, non-negotiable quantifiers (e.g., "学历：本科", "3年经验", "持有PMP证书", "工作地点在北京") as "must-have" conditions.
+- **Qualifications Are Minimums, Not Exact Targets:** For any qualification that can be measured on an ordinal scale — experience years, education level, language proficiency, skill level — the JD requirement is always a **minimum floor**, never a ceiling. A candidate who exceeds the stated requirement must **not** be disqualified for over-qualification on that dimension alone. Specific rules:
+    - **Experience year ranges** (e.g., "1-3年经验"): only the lower bound is a hard requirement. A candidate with 7 years where 1-3 are required is NOT disqualified.
+    - **Education level** (e.g., "学历：本科"): treat as "at least 本科". A candidate with a master's or PhD where 本科 is required is NOT disqualified.
+    - **Language / skill proficiency** (e.g., "英语四级"): treat as "at least CET-4". A candidate with CET-6 or higher is NOT disqualified.
+    - Economic fit (salary expectations exceeding budget) is the **only** dimension where exceeding a threshold is a valid disqualifier, and that is handled exclusively in Step 1.
 - **Identifying "Preferred" Conditions:** A condition is non-mandatory (a plus) if it contains keywords like "优先" (preferred), "加分" (bonus points), "最好" (best if), "希望" (hope), "熟悉" (familiar with), "了解" (understand), "优先考虑" (will be considered with priority), "可选" (optional), "不限" (no limit). If a JD says "学历不限" (education unlimited), it cannot be used as a disqualifying factor.
 - **Industry Experience Inference:** When a JD requires experience in a specific industry (e.g., "医疗行业经验", "金融行业背景", "新能源领域"), do NOT require the candidate to state this explicitly. Instead, look for supporting evidence in the resume: the nature of the company (from the candidate's own description), the products or services the candidate worked on, the domain terminology used in job duties, or the sector of the candidate's clients. If such evidence clearly points to the required industry, the condition is met. Only reject on this criterion if there is no such evidence at all.
 - **Stop at First Failure:** As soon as you find the *first* "must-have" condition that the candidate does not meet, stop all further analysis. The candidate is disqualified.
@@ -112,7 +117,7 @@ def _parse_content(content: str) -> interviewer:
     raise ValueError(f"Cannot parse LLM response: {content[:200]}")
 
 
-PROMPT_CACHE_KEY = "hr_eval_prompt_v0105"
+PROMPT_CACHE_KEY = "hr_eval_prompt_v0522"
 RETRY_DELAYS = [10, 30]  # seconds to wait before 1st and 2nd retry
 
 _base_url = os.getenv("OPENAI_BASE_URL", "")
