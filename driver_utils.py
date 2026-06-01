@@ -12,6 +12,32 @@ class DailyGreetingLimitReached(Exception):
     """Raised when the platform's daily greeting quota for the current job is exhausted."""
 
 
+class CaptchaRequired(BaseException):
+    """Raised when the platform redirects any frame to the CAPTCHA verification page.
+
+    Inherits BaseException so it is never silently swallowed by bare
+    `except Exception` handlers in the candidate-processing loops.
+    """
+
+
+CAPTCHA_URL_MARKER = 'verify-slider'
+
+
+async def _any_frame_has_captcha(tab) -> bool:
+    """Return True if the main tab or any child frame is showing the CAPTCHA page."""
+    if CAPTCHA_URL_MARKER in (tab.url or ''):
+        return True
+    try:
+        frame_tree = await tab.send(cdp.page.get_frame_tree())
+        def _walk(node):
+            if CAPTCHA_URL_MARKER in (node.frame.url or ''):
+                return True
+            return any(_walk(child) for child in (node.child_frames or []))
+        return _walk(frame_tree)
+    except Exception:
+        return False
+
+
 def jitter(mu: float, sigma: float | None = None) -> float:
     """Return a normally-distributed sleep duration centered on mu (sigma defaults to 25% of mu).
 
@@ -148,16 +174,17 @@ async def log_in(tab):
     results = await tab.xpath('//*[@id="wrap"]/div/div[2]/div[2]/div[1]')
     if results:
         await results[0].click()
+        target_url = 'https://www.zhipin.com/web/chat/index'
+        for _ in range(60):  # 30s timeout
+            await asyncio.sleep(0.5)
+            if tab.url == target_url:
+                break
+            if CAPTCHA_URL_MARKER in (tab.url or ''):
+                raise CaptchaRequired(f"CAPTCHA detected at login: {tab.url}")
+        else:
+            logger.warning("Login timeout")
     else:
-        logger.warning("Maybe we have logged in?")
-
-    target_url = 'https://www.zhipin.com/web/chat/index'
-    for _ in range(60):  # 30s timeout
-        await asyncio.sleep(0.5)
-        if tab.url == target_url:
-            break
-    else:
-        logger.warning("Login timeout")
+        logger.info("Already logged in.")
 
     logger.info("Logged in.")
     await asyncio.sleep(jitter(3))
@@ -394,6 +421,8 @@ async def get_resume(tab, idx) -> tuple[str | None, str]:
 
         # Poll until canvas is ready; timeout enforced by asyncio.wait_for() in caller
         while True:
+            if await _any_frame_has_captcha(tab):
+                raise CaptchaRequired("CAPTCHA detected while loading resume")
             all_fids = await _get_c_resume_frame_ids(tab)
             new_fids = [f for f in all_fids if f not in existing_fids]
             # Prefer the newly created frame; fall back to the last known one
@@ -641,6 +670,8 @@ async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
     """
     try:
         while True:
+            if await _any_frame_has_captcha(tab):
+                raise CaptchaRequired("CAPTCHA detected while loading resume")
             fids = await _get_c_resume_frame_ids(tab)
             if fids:
                 canvas_b64 = await _read_canvas_b64(tab, fids[-1])

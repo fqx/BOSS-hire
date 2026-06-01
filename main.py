@@ -138,6 +138,14 @@ async def main():
                     'viewed': viewed,
                     'greeted': greeted
                 }
+    except driver_utils.CaptchaRequired:
+        log_utils.logger.error(
+            "检测到滑块验证页面，程序已暂停。请在浏览器中完成验证，完成后按 Enter 键退出，重新运行程序即可继续。"
+        )
+        try:
+            await asyncio.to_thread(input)
+        except (EOFError, KeyboardInterrupt):
+            pass
     except TimeoutError as e:
         log_utils.logger.warning(f"服务器无响应，终止处理：{e}")
     except (KeyboardInterrupt, asyncio.CancelledError):
