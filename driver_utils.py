@@ -20,17 +20,31 @@ class CaptchaRequired(BaseException):
     """
 
 
-CAPTCHA_URL_MARKER = 'verify-slider'
+# BOSS uses several verification pages: the slider CAPTCHA (verify-slider) and a
+# button-click "安全验证" page at /web/passport/zp/verify.html. Match any of them.
+# Note: the verify page carries the original destination in a callbackUrl query
+# param, so substring matching must target the path, not the whole URL.
+CAPTCHA_URL_MARKERS = ('verify-slider', '/passport/zp/verify')
+
+
+def _url_is_captcha(url: str | None) -> bool:
+    """Return True if the URL path belongs to a known CAPTCHA/verification page.
+
+    Only the path (before the query string) is inspected so that a callbackUrl
+    pointing back at a normal page does not trigger a false positive.
+    """
+    path = (url or '').split('?', 1)[0]
+    return any(marker in path for marker in CAPTCHA_URL_MARKERS)
 
 
 async def _any_frame_has_captcha(tab) -> bool:
     """Return True if the main tab or any child frame is showing the CAPTCHA page."""
-    if CAPTCHA_URL_MARKER in (tab.url or ''):
+    if _url_is_captcha(tab.url):
         return True
     try:
         frame_tree = await tab.send(cdp.page.get_frame_tree())
         def _walk(node):
-            if CAPTCHA_URL_MARKER in (node.frame.url or ''):
+            if _url_is_captcha(node.frame.url):
                 return True
             return any(_walk(child) for child in (node.child_frames or []))
         return _walk(frame_tree)
@@ -179,7 +193,7 @@ async def log_in(tab):
             await asyncio.sleep(0.5)
             if tab.url == target_url:
                 break
-            if CAPTCHA_URL_MARKER in (tab.url or ''):
+            if _url_is_captcha(tab.url):
                 raise CaptchaRequired(f"CAPTCHA detected at login: {tab.url}")
         else:
             logger.warning("Login timeout")
