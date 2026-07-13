@@ -198,6 +198,8 @@ async def log_in(tab):
         else:
             logger.warning("Login timeout")
     else:
+        if _url_is_captcha(tab.url):
+            raise CaptchaRequired(f"CAPTCHA detected at login: {tab.url}")
         logger.info("Already logged in.")
 
     logger.info("Logged in.")
