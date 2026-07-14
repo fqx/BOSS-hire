@@ -90,7 +90,7 @@ Before producing the final output, perform a mandatory self-check: Does the valu
 class interviewer(BaseModel):
     reason: str
     is_qualified: bool
-    reason_category: str = ""  # one of 9 preset values, or "" if qualified
+    reason_category: str  # one of 9 preset values, or "" if qualified
 
 
 def _parse_content(content: str) -> interviewer:
@@ -168,6 +168,12 @@ def _call_chat_api(client, resume_image_base64: str, resume_requirement: str, ov
     """Local LM Studio path: Chat Completions API with json_schema output."""
     today = date.today().strftime("%Y-%m-%d")
     system_with_date = f"Today's date is {today}.\n\n{system_message}"
+    # xgrammar (omlx's local grammar-constrained decoder) honors minLength and enforces
+    # it at the token level, preventing the model from closing `reason` with zero content.
+    # OpenAI's strict structured outputs rejects minLength/default, so this override is
+    # local-path only; the cloud path in _call_responses_api uses the plain pydantic schema.
+    local_schema = interviewer.model_json_schema()
+    local_schema["properties"]["reason"]["minLength"] = 20
     response = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[
@@ -182,7 +188,7 @@ def _call_chat_api(client, resume_image_base64: str, resume_requirement: str, ov
         ],
         response_format={
             "type": "json_schema",
-            "json_schema": {"name": "interviewer", "schema": interviewer.model_json_schema()}
+            "json_schema": {"name": "interviewer", "schema": local_schema}
         },
         max_tokens=MAX_TOKENS_CHAT,
         timeout=120.0,
