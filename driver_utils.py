@@ -52,6 +52,19 @@ async def _any_frame_has_captcha(tab) -> bool:
         return False
 
 
+async def _find_or_captcha(tab, text: str):
+    """Wrap tab.find(text), raising CaptchaRequired instead of a bare timeout
+    when the platform redirected to the CAPTCHA page instead of showing the
+    expected element (tab.find has no captcha awareness of its own).
+    """
+    try:
+        return await tab.find(text)
+    except TimeoutError:
+        if await _any_frame_has_captcha(tab):
+            raise CaptchaRequired(f"CAPTCHA detected while waiting for '{text}'")
+        raise
+
+
 def jitter(mu: float, sigma: float | None = None) -> float:
     """Return a normally-distributed sleep duration centered on mu (sigma defaults to 25% of mu).
 
@@ -234,7 +247,7 @@ async def ensure_list_view(tab):
 
 
 async def goto_recommend(tab):
-    link = await tab.find("推荐牛人")
+    link = await _find_or_captcha(tab, "推荐牛人")
     await link.click()
     # Wait for the recommendFrame iframe to appear
     for _ in range(20):
@@ -578,7 +591,7 @@ async def goto_new_greetings(tab) -> int:
     await tab.get('https://www.zhipin.com/web/chat/index')
     await asyncio.sleep(jitter(2))
     await dismiss_hover_panels(tab)
-    link = await tab.find("新招呼")
+    link = await _find_or_captcha(tab, "新招呼")
     # The count lives in <em class="num"> inside the same <span class="content">,
     # so link.text (direct text node only) won't include it — query the DOM directly.
     count = await tab.evaluate(r"""
@@ -601,7 +614,7 @@ async def goto_new_greetings(tab) -> int:
     await link.click()
     await asyncio.sleep(jitter(2))
     # Click 未读 to show only unread candidates
-    unread_tab = await tab.find("未读")
+    unread_tab = await _find_or_captcha(tab, "未读")
     await unread_tab.click()
     await asyncio.sleep(jitter(1))
     return count
@@ -674,7 +687,7 @@ async def open_online_resume_greeting(tab):
     # to a safe area first so the panel collapses before we try to click.
     await dismiss_hover_panels(tab)
     await _enable_cors_intercept(tab)
-    btn = await tab.find("在线简历")
+    btn = await _find_or_captcha(tab, "在线简历")
     await btn.click()
     await asyncio.sleep(jitter(2))
 
@@ -740,7 +753,7 @@ async def send_chat_message(tab, text: str):
         }})()
     """)
     await asyncio.sleep(jitter(0.5))
-    send_btn = await tab.find("发送")
+    send_btn = await _find_or_captcha(tab, "发送")
     await send_btn.click()
     await asyncio.sleep(jitter(1))
 
