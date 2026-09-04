@@ -20,6 +20,14 @@ class CaptchaRequired(BaseException):
     """
 
 
+class JobPositionNotFound(RuntimeError):
+    """Raised when the configured job is absent from the BOSS job selector.
+
+    Continuing after this condition would scan candidates for whichever job was
+    selected previously, so callers must stop the current run instead.
+    """
+
+
 # BOSS uses several verification pages: the slider CAPTCHA (verify-slider) and a
 # button-click "安全验证" page at /web/passport/zp/verify.html. Match any of them.
 # Note: the verify page carries the original destination in a callbackUrl query
@@ -52,6 +60,12 @@ async def _any_frame_has_captcha(tab) -> bool:
         return False
 
 
+async def raise_if_captcha(tab, context: str):
+    """Raise immediately when BOSS has redirected the current page or a frame."""
+    if await _any_frame_has_captcha(tab):
+        raise CaptchaRequired(f"CAPTCHA detected {context}: {tab.url}")
+
+
 async def _find_or_captcha(tab, text: str):
     """Wrap tab.find(text), raising CaptchaRequired instead of a bare timeout
     when the platform redirected to the CAPTCHA page instead of showing the
@@ -60,8 +74,7 @@ async def _find_or_captcha(tab, text: str):
     try:
         return await tab.find(text)
     except TimeoutError:
-        if await _any_frame_has_captcha(tab):
-            raise CaptchaRequired(f"CAPTCHA detected while waiting for '{text}'")
+        await raise_if_captcha(tab, f"while waiting for '{text}'")
         raise
 
 
@@ -251,12 +264,20 @@ async def goto_recommend(tab):
     await link.click()
     # Wait for the recommendFrame iframe to appear
     for _ in range(20):
+        # The risk-control redirect happens after clicking the navigation link.
+        # Without checking here, the iframe wait expires and the caller continues
+        # against the verification page as if recommendation loading had succeeded.
+        await raise_if_captcha(tab, "while opening recommendations")
         found = await tab.evaluate(
             '!!document.querySelector(\'iframe[name="recommendFrame"]\')'
         )
         if found:
             break
         await asyncio.sleep(0.5)
+    else:
+        # Check once more at the timeout boundary in case navigation completed
+        # between the last poll and the end of the loop.
+        await raise_if_captcha(tab, "while opening recommendations")
     await asyncio.sleep(jitter(2))
 
 
@@ -541,9 +562,58 @@ async def scroll_down(tab):
     await _in_frame(tab, "win.scrollTo(0, win.scrollY + 180);")
 
 
-async def select_job_position(tab, job_title):
+def _normalize_job_option_label(label):
+    """Normalize whitespace without discarding any selector identity fields."""
+    return re.sub(r'\s+', ' ', label or '').strip()
+
+
+def _job_option_business_title(label):
+    normalized = _normalize_job_option_label(label)
+    return re.split(r'\s+_\s+', normalized, maxsplit=1)[0]
+
+
+def _select_job_option_label(option_labels, job_title, selector_job_title=None):
+    """Resolve exactly one job by business title or an explicit full selector label."""
+    title_matches = [
+        label for label in option_labels
+        if _job_option_business_title(label) == job_title
+    ]
+    if selector_job_title:
+        normalized_selector = _normalize_job_option_label(selector_job_title)
+        matches = [
+            label for label in title_matches
+            if _normalize_job_option_label(label) == normalized_selector
+        ]
+    else:
+        matches = title_matches
+
+    if len(matches) != 1:
+        raise JobPositionNotFound(
+            f"Expected exactly one job for job_title='{job_title}' and "
+            f"selector_job_title='{selector_job_title}', found {len(matches)}; "
+            f"candidate full labels={title_matches}. Configure selector_job_title "
+            "with the exact full dropdown label to disambiguate."
+        )
+    return matches[0]
+
+
+async def select_job_position(tab, job_title, selector_job_title=None):
+    await raise_if_captcha(tab, f"before selecting job '{job_title}'")
     await _frame_mouse_click_css(tab, '.ui-dropmenu-label')
     await asyncio.sleep(jitter(1))
+    await raise_if_captcha(tab, f"while selecting job '{job_title}'")
+
+    option_labels = await _in_frame(tab, """
+        return Array.from(doc.querySelectorAll('ul.job-list li.job-item'))
+            .map(function(option) { return option.innerText.trim(); });
+    """) or []
+    try:
+        selected_option_label = _select_job_option_label(
+            option_labels, job_title, selector_job_title
+        )
+    except JobPositionNotFound as error:
+        logger.error(str(error))
+        raise
 
     pos = await tab.evaluate(f"""
         (function() {{
@@ -554,7 +624,7 @@ async def select_job_position(tab, job_title):
             if (!doc) return null;
             var options = Array.from(doc.querySelectorAll('ul.job-list li.job-item'));
             for (var opt of options) {{
-                if (opt.textContent.trim().startsWith({repr(job_title)})) {{
+                if (opt.innerText.trim() === {repr(selected_option_label)}) {{
                     opt.scrollIntoView({{block: 'nearest'}});
                     var r = opt.getBoundingClientRect();
                     return JSON.stringify({{x: frameRect.left + r.left + r.width / 2, y: frameRect.top + r.top + r.height / 2}});
@@ -563,14 +633,35 @@ async def select_job_position(tab, job_title):
             return null;
         }})()
     """)
-    if pos:
-        coords = json.loads(pos)
-        await tab.mouse_click(coords['x'], coords['y'])
-        logger.info(f"Selected job: {job_title}")
-        await asyncio.sleep(jitter(5))
-        await ensure_list_view(tab)
-    else:
-        logger.warning(f"No job found starting with: {job_title}")
+    if not pos:
+        message = f"Resolved job option is no longer clickable: {selected_option_label}"
+        logger.error(message)
+        raise JobPositionNotFound(message)
+
+    coords = json.loads(pos)
+    await tab.mouse_click(coords['x'], coords['y'])
+    await asyncio.sleep(jitter(5))
+    await raise_if_captcha(tab, f"after selecting job '{job_title}'")
+    selected_label = await _in_frame(tab, """
+        var label = doc.querySelector('.ui-dropmenu-label');
+        return label ? label.innerText.trim() : null;
+    """)
+    if _normalize_job_option_label(selected_label) != _normalize_job_option_label(
+        selected_option_label
+    ):
+        message = (
+            f"Job selection mismatch: expected '{selected_option_label}', "
+            f"actual '{selected_label}'"
+        )
+        logger.error(message)
+        raise JobPositionNotFound(message)
+    logger.info(
+        "Selected job confirmed: configured=%s selector_job_title=%s actual=%s",
+        job_title,
+        selector_job_title,
+        selected_label,
+    )
+    await ensure_list_view(tab)
 
 
 # XPath constants for 新招呼 list (verified via DevTools)
@@ -870,6 +961,7 @@ async def dismiss_hover_panels(tab):
 
 async def close_popover(tab):
     while True:
+        await raise_if_captcha(tab, "while closing popovers")
         clicked = await _mouse_click_css(tab, '.iboss-close', warn=False)
         if not clicked:
             break

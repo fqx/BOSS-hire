@@ -5,7 +5,9 @@ import json
 import re
 import time
 from datetime import date
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 from requests.exceptions import Timeout
 import os
 import openai
@@ -24,7 +26,7 @@ You are a highly experienced, meticulous, and objective Human Resources (HR) eva
 ## Core Evaluation Principles
 1.  **Objectivity and Evidence-Based:** Your entire analysis must be based *solely* on the text provided in the candidate's resume and the job description. Do not fabricate facts or apply speculative external knowledge. However, you **must** perform reasonable contextual inference from evidence present in the resume text itself: if a candidate's job responsibilities, products worked on, employer descriptions, or domain-specific terminology clearly indicate a particular industry, you **must** treat this as valid industry experience — even if the candidate does not use the exact phrase from the JD. For example, a candidate who worked on medical device firmware is inferred to have medical device industry experience; a candidate whose resume describes work on loan disbursement systems at a bank is inferred to have financial industry experience.
 2.  **Strict Adherence to Rules:** You must follow all specified rules, especially the distinction between "must-have" and "preferred" conditions, the salary calculation, and the output formatting. There is no room for leniency or "almost-fits" judgments.
-3.  **Consistency is Paramount:** The final boolean flag `is_qualified` must perfectly mirror the conclusion stated in the first sentence of the `reason`. This is a critical consistency check.
+3.  **Consistency is Paramount:** The final boolean flag `is_qualified` must perfectly mirror the final conclusion reached after completing the full evaluation and writing the complete `reason`. This is a critical consistency check.
 
 ## Detailed Step-by-Step Instructions for Evaluation
 Follow this sequence precisely for every candidate evaluation. Do not deviate.
@@ -65,32 +67,62 @@ If the salary check was successful, now evaluate the mandatory requirements one 
 如果候选人符合，reason_category 输出空字符串 ""。
 
 ## Output Generation Rules (Strictly Enforced)
-Your final output must be a JSON object containing `is_qualified`, `reason`, and `reason_category`. The generation of this output must follow a specific, unchangeable order.
+Your final output must be a JSON object whose fields are generated in this exact order: `reason`, `reason_category`, then `is_qualified`.
 
-1.  **Determine the Final Conclusion:** Based on your step-by-step analysis, you will have a final conclusion: either "Qualified" or "Not Qualified" (with the specific reason for failure).
+1.  **Write the Complete `reason`:** First finish the evaluation and write a concise, evidence-based explanation containing your final conclusion. Do not commit to a verdict in the first sentence before completing the evaluation. Mention the first failed hard rule when the candidate is not qualified; summarize the strongest matching evidence when qualified. The wording must be direct and conclusive, without hypothetical or negotiable alternatives. End the complete reason with exactly one machine-checkable line: `最终结论：符合` or `最终结论：不符合`.
 
-2.  **Write the `reason` First Sentence:** This sentence is formulaic and depends entirely on the conclusion from Step 1.
-    - If the conclusion is "Qualified", the sentence **must** be: `候选人{姓名}符合该职位`
-    - If the conclusion is "Not Qualified", the sentence **must** be: `候选人{姓名}不符合该职位`
-    - If the candidate's name cannot be identified, use "候选人" as a substitute.
+2.  **Choose `reason_category`:** Only after the complete reason and its final marker are settled, choose the single matching category from the allowed list above. Use an empty string only when the marker is `最终结论：符合`.
 
-3.  **Set the `is_qualified` Boolean:** Now, set the boolean value to match the `reason`'s first sentence perfectly.
-    - If the first sentence starts with "符合该职位" -> `is_qualified = True`.
-    - If the first sentence starts with "不符合该职位" -> `is_qualified = False`.
-
-4.  **Complete the `reason` Body:**
-    - **For "Qualified" cases:** After the required first sentence, add a brief summary of why the candidate is a good match, highlighting key qualifications.
-    - **For "Not Qualified" cases:** After the required first sentence, you **must immediately** state the *very first* rule that the candidate failed. Provide a brief, evidence-based explanation using data from the JD and resume. For example, "...因为该职位要求候选人目前处于离职状态，而候选人简历显示其仍在职。" or "...因为候选人期望的最低薪酬高于职位最低薪酬的1.5倍。"
-    - **Writing Style:** The `reason` must be direct and conclusive. Avoid transitional words like "但是" (but), "然而" (however), or conditional statements like "如果..." (if...).
+3.  **Set `is_qualified` Last:** Generate this boolean last: use `true` for `最终结论：符合` and `false` for `最终结论：不符合`. Do not revise the reason after setting this field.
 
 ### Final Self-Correction Check
-Before producing the final output, perform a mandatory self-check: Does the value of `is_qualified` perfectly align with the verdict in the first sentence of `reason`? If not, you must correct `is_qualified` to match the `reason`'s statement. This is a non-negotiable final step. Do not suggest negotiation, flexibility, or alternative outcomes.
+Before producing the final output, perform a mandatory self-check: do the reason's final marker, `reason_category`, and the last-generated `is_qualified` all express the same conclusion? If not, correct `reason_category` and `is_qualified`. Do not infer consistency from the opening phrase alone. This is a non-negotiable final step.
 """
 
+DISQUALIFICATION_REASON_CATEGORIES = (
+    "薪资不符",
+    "学历不符",
+    "年龄不符",
+    "期望不符",
+    "距离太远",
+    "过往经历不符",
+    "简历不真实",
+    "已找到工作",
+    "其他原因",
+)
+
+ReasonCategory = Literal[
+    "",
+    "薪资不符",
+    "学历不符",
+    "年龄不符",
+    "期望不符",
+    "距离太远",
+    "过往经历不符",
+    "简历不真实",
+    "已找到工作",
+    "其他原因",
+]
+
+
 class interviewer(BaseModel):
-    reason: str
+    reason: str = Field(
+        pattern=r"[\s\S]*最终结论[：:]\s*(?:符合|不符合)\s*$"
+    )
+    reason_category: ReasonCategory
     is_qualified: bool
-    reason_category: str  # one of 9 preset values, or "" if qualified
+
+    @model_validator(mode="after")
+    def validate_reason_category(self):
+        verdict_match = re.search(r"最终结论[：:]\s*(符合|不符合)\s*$", self.reason)
+        marker_is_qualified = verdict_match.group(1) == "符合"
+        if self.is_qualified != marker_is_qualified:
+            raise ValueError("is_qualified must match the reason's final verdict marker")
+        if marker_is_qualified and self.reason_category:
+            raise ValueError("qualified results must use an empty reason_category")
+        if not marker_is_qualified and not self.reason_category:
+            raise ValueError("unqualified results must use a disqualification reason_category")
+        return self
 
 
 def _parse_content(content: str) -> interviewer:

@@ -1,6 +1,7 @@
 from tqdm import tqdm
 import asyncio
 import driver_utils, llm_utils
+import json
 import os, re
 from log_utils import logger
 from dotenv import load_dotenv
@@ -86,14 +87,15 @@ def parse_resume(resume_text):
     return parsed_data
 
 default_job_requirements = {
-        'age_lower_bound': 0,
-        'age_upper_bound': 100,
-        "maximum_salary": -1,
-        "education": 0,
-        "off_the_job": 0,
-        'cv_required_keywords': [],
-        'cv_requirements': '',
-    }
+    'age_lower_bound': 0,
+    'age_upper_bound': 100,
+    "maximum_salary": -1,
+    "selector_job_title": None,
+    "education": 0,
+    "off_the_job": 0,
+    'cv_required_keywords': [],
+    'cv_requirements': '',
+}
 
 
 def get_job_requirements(job_requirements):
@@ -102,29 +104,119 @@ def get_job_requirements(job_requirements):
     return result
 
 
-def check_if_contains_any_character(a_list, b_string):
-  """
-  Checks if a string contains any character from a list of strings.
+def get_matched_keywords(keywords, resume_text):
+    """Return configured keywords found in a resume card, preserving config order."""
+    return [keyword for keyword in keywords if keyword in resume_text]
 
-  Args:
-    a_list (list): The list of strings to check.
-    b_string (str): The string to check for characters.
 
-  Returns:
-    bool: True if b_string contains any character from a_list, False otherwise.
-  """
+def resume_diagnostics_enabled():
+    return os.getenv("SAVE_RESUME_DIAGNOSTICS", "false").lower() == "true"
 
-  # If the list is empty, return True.
-  if not a_list:
+
+def save_resume_diagnostic(
+    job_title,
+    idx,
+    resume_dict,
+    matched_keywords,
+    prefilter_passed,
+    elimination_stage,
+    resume_card_text,
+):
+    """Optionally append local resume-card diagnostics for recommendation tuning."""
+    if not resume_diagnostics_enabled():
+        return False
+
+    configured_output_path = os.getenv("RESUME_DIAGNOSTICS_PATH")
+    output_path = configured_output_path or os.path.join(
+        "diagnostics", "resume_cards.jsonl"
+    )
+    output_dir = os.path.dirname(output_path)
+    record = {
+        "job_title": job_title,
+        "idx": idx,
+        "age": resume_dict.get("age"),
+        "salary_lower_bound": resume_dict.get("salary_lower_bound"),
+        "salary_upper_bound": resume_dict.get("salary_upper_bound"),
+        "education": resume_dict.get("education"),
+        "job_status": resume_dict.get("job_status"),
+        "matched_keywords": matched_keywords,
+        "prefilter_passed": prefilter_passed,
+        "elimination_stage": elimination_stage,
+        "resume_card_text": resume_card_text,
+    }
+    encoded_record = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    try:
+        if output_dir:
+            os.makedirs(output_dir, mode=0o700, exist_ok=True)
+            # Resume cards contain personal information. Tighten even an existing
+            # diagnostics directory before opening the output file; if this fails,
+            # the exception is caught below and no candidate data is written.
+            os.chmod(output_dir, 0o700)
+        else:
+            raise PermissionError(
+                "RESUME_DIAGNOSTICS_PATH must use a dedicated parent directory"
+            )
+        file_descriptor = os.open(
+            output_path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            os.fchmod(file_descriptor, 0o600)
+            written = os.write(file_descriptor, encoded_record)
+            if written != len(encoded_record):
+                raise OSError(
+                    f"partial diagnostic append: wrote {written}/{len(encoded_record)} bytes"
+                )
+        finally:
+            os.close(file_descriptor)
+    except OSError as error:
+        logger.warning(
+            "简历诊断写入失败，招聘流程继续：path=%s error=%s",
+            output_path,
+            error,
+        )
+        return False
+
+    logger.info(
+        "简历诊断：职位=%s #%s 阶段=%s 预筛=%s 命中关键词=%s",
+        job_title,
+        idx,
+        elimination_stage,
+        prefilter_passed,
+        matched_keywords,
+    )
     return True
 
-  # Iterate over the list of strings and check if b_string contains any of them.
-  for string in a_list:
-    if string in b_string:
-      return True
 
-  # If no match is found, return False.
-  return False
+async def save_age_rejection_diagnostic(tab, job_title, idx, age, keywords):
+    """Capture an age-stage record when diagnostics are enabled and the card is readable."""
+    if not resume_diagnostics_enabled():
+        return
+    try:
+        resume_text = await driver_utils.get_resume_card_text(tab, idx)
+        if not resume_text:
+            save_resume_diagnostic(
+                job_title, idx, {"age": age}, [], False, "parse_error", ""
+            )
+            return
+        resume_dict = parse_resume(resume_text)
+        if resume_dict['age'] is None:
+            resume_dict['age'] = age
+        save_resume_diagnostic(
+            job_title,
+            idx,
+            resume_dict,
+            get_matched_keywords(keywords, resume_text),
+            False,
+            "age",
+            resume_text,
+        )
+    except Exception as error:
+        logger.warning("#%s 年龄淘汰诊断解析失败：%s", idx, error)
+        save_resume_diagnostic(
+            job_title, idx, {"age": age}, [], False, "parse_error", ""
+        )
 
 
 async def loop_greetings(tab, job_configs: list, client, job_stats: dict, total: int = 0) -> int:
@@ -145,6 +237,7 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict, total:
         log_handler.set_tqdm(pbar)
         try:
             while idx <= MAX_SCAN:
+                await driver_utils.raise_if_captcha(tab, "during greeting scan")
                 matched = None
                 if not already_navigated:
                     unread = await driver_utils.is_greeting_unread(tab, idx)
@@ -261,6 +354,7 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
 
         while idx < max_idx:
             try:
+                await driver_utils.raise_if_captcha(tab, "during recommendation scan")
                 idx += 1
                 if await driver_utils.is_viewed(tab, idx):
                     logger.info(f"#{idx} 已经查看过。")
@@ -272,13 +366,34 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
                 if job_requirements['age_lower_bound'] <= age <= job_requirements['age_upper_bound']:
                     resume_text = await driver_utils.get_resume_card_text(tab, idx)
 
-                    resume_dict = parse_resume(resume_text)
+                    try:
+                        if not resume_text:
+                            raise ValueError("empty resume card text")
+                        resume_dict = parse_resume(resume_text)
+                    except Exception as error:
+                        logger.warning(f"#{idx} 简历卡片解析失败：{error}")
+                        save_resume_diagnostic(
+                            job_title, idx, {"age": age}, [], False,
+                            "parse_error", resume_text or "",
+                        )
+                        await driver_utils.scroll_down(tab)
+                        pbar.update(1)
+                        continue
+                    if resume_dict['age'] is None:
+                        resume_dict['age'] = age
+                    matched_keywords = get_matched_keywords(
+                        job_requirements['cv_required_keywords'], resume_text
+                    )
                     if job_requirements['maximum_salary'] <= 0 or (resume_dict['salary_lower_bound'] is not None and job_requirements['maximum_salary'] > resume_dict['salary_lower_bound'] > 0):
                         # salary ok
                         if resume_dict['education'] >= job_requirements['education']: # education ok
                             if job_requirements['off_the_job'] <= 0 or resume_dict['job_status'] == '离职-随时到岗': # off_the_job ok:
 
-                                if check_if_contains_any_character(job_requirements['cv_required_keywords'], resume_text):
+                                if not job_requirements['cv_required_keywords'] or matched_keywords:
+                                    save_resume_diagnostic(
+                                        job_title, idx, resume_dict, matched_keywords, True,
+                                        "passed", resume_text,
+                                    )
                                     logger.info("#{} 简历符合要求。调用LLM进一步处理。".format(idx))
 
                                     resume_image_base64, overview_text = await asyncio.wait_for(
@@ -306,26 +421,49 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
                                     pbar.update(1)
                                     continue
                                 else:
+                                    save_resume_diagnostic(
+                                        job_title, idx, resume_dict, matched_keywords, False,
+                                        "keywords", resume_text,
+                                    )
                                     logger.info('#{} 关键词不符合要求。'.format(idx))
                                     await driver_utils.scroll_down(tab)
                                     pbar.update(1)
                                     continue
                             else:
+                                save_resume_diagnostic(
+                                    job_title, idx, resume_dict, matched_keywords, False,
+                                    "employment_status", resume_text,
+                                )
                                 logger.info('#{} 在职情况不符合要求。'.format(idx))
                                 await driver_utils.scroll_down(tab)
                                 pbar.update(1)
                                 continue
                         else:
+                            save_resume_diagnostic(
+                                job_title, idx, resume_dict, matched_keywords, False,
+                                "education", resume_text,
+                            )
                             logger.info('#{} 教育情况不符合要求。'.format(idx))
                             await driver_utils.scroll_down(tab)
                             pbar.update(1)
                             continue
                     else:
+                        save_resume_diagnostic(
+                            job_title, idx, resume_dict, matched_keywords, False,
+                            "salary", resume_text,
+                        )
                         logger.info('#{} 薪资不符合要求。'.format(idx))
                         await driver_utils.scroll_down(tab)
                         pbar.update(1)
                         continue
 
+                await save_age_rejection_diagnostic(
+                    tab,
+                    job_title,
+                    idx,
+                    age,
+                    job_requirements['cv_required_keywords'],
+                )
                 logger.info('#{} 年龄不符合要求。'.format(idx))
                 await driver_utils.scroll_down(tab)
                 pbar.update(1)

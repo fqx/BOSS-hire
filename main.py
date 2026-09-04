@@ -124,11 +124,15 @@ async def main():
                 # close popover
                 await driver_utils.close_popover(tab)
 
-                # Select specific job position
-                await driver_utils.select_job_position(tab, job_title)
-
-                # Get job requirements
+                # Resolve screening and selector requirements independently.
                 job_requirements = job_utils.get_job_requirements(params['job_requirements'])
+
+                # Select specific job position
+                await driver_utils.select_job_position(
+                    tab,
+                    job_title,
+                    job_requirements['selector_job_title'],
+                )
 
                 # Scan recommend loop for this specific job
                 viewed, greeted = await job_utils.loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_title)
