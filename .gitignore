@@ -239,6 +239,9 @@ venv.bak/
 # mkdocs documentation
 /site
 
+# Local recruitment configuration
+/销售专员.json
+
 # mypy
 .mypy_cache/
 .dmypy.json
