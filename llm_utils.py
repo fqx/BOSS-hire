@@ -7,7 +7,7 @@ import time
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 from requests.exceptions import Timeout
 import os
 import openai
@@ -69,14 +69,16 @@ If the salary check was successful, now evaluate the mandatory requirements one 
 ## Output Generation Rules (Strictly Enforced)
 Your final output must be a JSON object whose fields are generated in this exact order: `reason`, `reason_category`, then `is_qualified`.
 
-1.  **Write the Complete `reason`:** First finish the evaluation and write a concise, evidence-based explanation containing your final conclusion. Do not commit to a verdict in the first sentence before completing the evaluation. Mention the first failed hard rule when the candidate is not qualified; summarize the strongest matching evidence when qualified. The wording must be direct and conclusive, without hypothetical or negotiable alternatives. End the complete reason with exactly one machine-checkable line: `最终结论：符合` or `最终结论：不符合`.
+The first line of `reason` must be `候选人姓名：{姓名}`. Read the candidate's name directly from the supplied resume image as a visual-reading checkpoint; do not substitute a name from the text overview, job description, or an example. Preserve any masking exactly as displayed in the image. Never guess or invent a name. Put the evaluation on the following line. This name-only opening must not include a qualification verdict.
 
-2.  **Choose `reason_category`:** Only after the complete reason and its final marker are settled, choose the single matching category from the allowed list above. Use an empty string only when the marker is `最终结论：符合`.
+1.  **Write the Complete `reason`:** First finish the evaluation and write a concise, evidence-based explanation containing your final conclusion. Do not commit to a verdict in the first sentence before completing the evaluation. Mention the first failed hard rule when the candidate is not qualified; summarize the strongest matching evidence when qualified. The wording must be direct and conclusive, without hypothetical or negotiable alternatives. No fixed concluding phrase is required; `is_qualified` carries the final verdict.
 
-3.  **Set `is_qualified` Last:** Generate this boolean last: use `true` for `最终结论：符合` and `false` for `最终结论：不符合`. Do not revise the reason after setting this field.
+2.  **Choose `reason_category`:** After completing the evaluation, choose the single matching category from the allowed list above. Use an empty string only when the candidate is qualified.
+
+3.  **Set `is_qualified` Last:** Generate this boolean last: use `true` when the candidate is qualified and `false` otherwise. This field is the authoritative final verdict. Do not revise the reason after setting this field.
 
 ### Final Self-Correction Check
-Before producing the final output, perform a mandatory self-check: do the reason's final marker, `reason_category`, and the last-generated `is_qualified` all express the same conclusion? If not, correct `reason_category` and `is_qualified`. Do not infer consistency from the opening phrase alone. This is a non-negotiable final step.
+Before producing the final output, perform a mandatory self-check: do the explanation in `reason`, `reason_category`, and the last-generated `is_qualified` all express the same conclusion? If not, correct `reason_category` and `is_qualified`. Do not infer consistency from the opening phrase alone. This is a non-negotiable final step.
 """
 
 DISQUALIFICATION_REASON_CATEGORIES = (
@@ -106,21 +108,15 @@ ReasonCategory = Literal[
 
 
 class interviewer(BaseModel):
-    reason: str = Field(
-        pattern=r"[\s\S]*最终结论[：:]\s*(?:符合|不符合)\s*$"
-    )
+    reason: str
     reason_category: ReasonCategory
     is_qualified: bool
 
     @model_validator(mode="after")
     def validate_reason_category(self):
-        verdict_match = re.search(r"最终结论[：:]\s*(符合|不符合)\s*$", self.reason)
-        marker_is_qualified = verdict_match.group(1) == "符合"
-        if self.is_qualified != marker_is_qualified:
-            raise ValueError("is_qualified must match the reason's final verdict marker")
-        if marker_is_qualified and self.reason_category:
+        if self.is_qualified and self.reason_category:
             raise ValueError("qualified results must use an empty reason_category")
-        if not marker_is_qualified and not self.reason_category:
+        if not self.is_qualified and not self.reason_category:
             raise ValueError("unqualified results must use a disqualification reason_category")
         return self
 
@@ -146,7 +142,12 @@ def _parse_content(content: str) -> interviewer:
             return interviewer(**json.loads(m.group(0)))
         except Exception:
             pass
-    raise ValueError(f"Cannot parse LLM response: {content[:200]}")
+    # Decode JSON escapes before truncating so Chinese remains readable in logs.
+    try:
+        log_content = json.dumps(json.loads(content), ensure_ascii=False)
+    except (json.JSONDecodeError, TypeError):
+        log_content = content
+    raise ValueError(f"Cannot parse LLM response: {log_content[:200]}")
 
 
 PROMPT_CACHE_KEY = "hr_eval_prompt_v0522"
@@ -193,7 +194,15 @@ def _call_responses_api(client, resume_image_base64: str, resume_requirement: st
     )
     if response.output_parsed is not None:
         return response.output_parsed
-    return _parse_content(response.output_text)
+    try:
+        return _parse_content(response.output_text)
+    except ValueError as exc:
+        status = getattr(response, "status", None)
+        details = getattr(response, "incomplete_details", None)
+        reason = getattr(details, "reason", None)
+        raise ValueError(
+            f"{exc} (status={status!r}, incomplete_reason={reason!r})"
+        ) from exc
 
 
 def _call_chat_api(client, resume_image_base64: str, resume_requirement: str, overview_text: str) -> interviewer:
@@ -231,7 +240,11 @@ def _call_chat_api(client, resume_image_base64: str, resume_requirement: str, ov
         # LM Studio 0.4.7+: with json_schema format, the structured output
         # is placed in reasoning_content while content is left empty.
         content = (msg.model_extra or {}).get("reasoning_content", "") or ""
-    return _parse_content(content)
+    try:
+        return _parse_content(content)
+    except ValueError as exc:
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        raise ValueError(f"{exc} (finish_reason={finish_reason!r})") from exc
 
 
 def _is_retryable(exc: Exception) -> bool:

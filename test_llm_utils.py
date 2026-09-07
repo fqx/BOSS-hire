@@ -58,46 +58,32 @@ class InterviewerSchemaTests(unittest.TestCase):
                     is_qualified=False,
                 )
 
-    def test_reason_can_revise_initial_rejection_before_qualified_marker(self):
+    def test_parse_accepts_unqualified_result_without_final_marker(self):
+        content = (
+            '{"reason":"候选人姓名：谢薇\\n候选人缺少相关经验。",'
+            '"reason_category":"过往经历不符","is_qualified":false}'
+        )
+        client = self._client_returning(content)
+        with patch.object(llm_utils, "_is_openai_cloud", False):
+            result = llm_utils.is_qualified_result(client, "image", "requirements")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.is_qualified)
+        self.assertTrue(result.reason.startswith("候选人姓名：谢薇"))
+
+    def test_boolean_is_authoritative_over_legacy_marker(self):
         result = llm_utils.interviewer(
-            reason=(
-                "初步看候选人不符合，但复核后确认直播和舞蹈两项硬性要求均满足。"
-                "\n最终结论：符合"
-            ),
+            reason="候选人姓名：测试\n最终结论：不符合",
             reason_category="",
             is_qualified=True,
         )
         self.assertTrue(result.is_qualified)
 
-    def test_rejects_boolean_that_conflicts_with_final_marker(self):
-        with self.assertRaises(ValidationError):
-            llm_utils.interviewer(
-                reason="候选人缺少舞蹈基础。\n最终结论：不符合",
-                reason_category="过往经历不符",
-                is_qualified=True,
-            )
-
-    def test_parse_returns_failure_for_conflicting_structured_response(self):
-        content = (
-            '{"reason":"缺少舞蹈基础。\\n最终结论：不符合",'
-            '"reason_category":"过往经历不符","is_qualified":true}'
+    def test_qualified_result_without_final_marker(self):
+        result = llm_utils._parse_content(
+            '{"reason":"候选人姓名：测试，相关经验满足要求。",'
+            '"reason_category":"","is_qualified":true}'
         )
-        with self.assertRaises(ValueError):
-            llm_utils._parse_content(content)
-
-    def test_public_apis_fail_closed_for_conflicting_structured_response(self):
-        content = (
-            '{"reason":"缺少舞蹈基础。\\n最终结论：不符合",'
-            '"reason_category":"过往经历不符","is_qualified":true}'
-        )
-        client = self._client_returning(content)
-        with patch.object(llm_utils, "_is_openai_cloud", False):
-            self.assertFalse(
-                llm_utils.is_qualified(client, "image", "requirements")
-            )
-            self.assertIsNone(
-                llm_utils.is_qualified_result(client, "image", "requirements")
-            )
+        self.assertTrue(result.is_qualified)
 
 
 if __name__ == "__main__":
