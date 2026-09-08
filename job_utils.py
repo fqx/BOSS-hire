@@ -348,7 +348,7 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
 
     # Wrap the main loop with tqdm
     with tqdm(total=max_idx, desc=f"Processing Resumes for {job_title}", unit="resume",
-              leave=True) as pbar:
+              leave=True, dynamic_ncols=True) as pbar:
         # 将当前进度条实例传递给日志处理器
         log_handler.set_tqdm(pbar)
 
