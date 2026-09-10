@@ -11,6 +11,22 @@ import driver_utils
 import job_utils
 
 
+class ResumeGenderTests(unittest.TestCase):
+    def test_explicit_gender_preserves_existing_fields(self):
+        text = "5-7K 测试候选人 28岁 大专 离职-随时到岗 期望：销售"
+        original = job_utils.parse_resume(text)
+        self.assertIsNone(original["gender"])
+        for gender in ("男", "女"):
+            with self.subTest(gender=gender):
+                parsed = job_utils.parse_resume(text + "\n性别：" + gender)
+                self.assertEqual(parsed, {**original, "gender": gender})
+
+    def test_names_and_work_experience_do_not_imply_gender(self):
+        for text in ("5-7K 张女士 28岁 女装销售", "5-7K 王先生 28岁 男装销售", "性别：未知", "优势：负责性别：女的客户"):
+            with self.subTest(text=text):
+                self.assertIsNone(job_utils.parse_resume(text)["gender"])
+
+
 class ResumeDiagnosticTests(unittest.TestCase):
     def setUp(self):
         self.resume = {

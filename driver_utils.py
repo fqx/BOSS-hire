@@ -282,12 +282,17 @@ async def goto_recommend(tab):
 
 
 async def get_resume_card_text(tab, idx) -> str:
-    """Return textContent of resume card at position idx."""
+    """Return card text with the explicit gender icon serialized as a field."""
     result = await _in_frame(tab, f"""
         var res = doc.evaluate({repr(xpath_resume_card.format(i=idx))}, doc, null,
             XPathResult.FIRST_ORDERED_NODE_TYPE, null);
         var card = res.singleNodeValue;
-        return card ? card.textContent : null;
+        if (!card) return null;
+        var icon = card.querySelector('svg.gender use');
+        var href = icon && (icon.getAttribute('href') || icon.getAttribute('xlink:href'));
+        var gender = href === '#icon-icon-man' ? '男'
+            : href === '#icon-icon-woman' ? '女' : null;
+        return card.textContent + (gender ? '\\n性别：' + gender : '');
     """)
     return result or ''
 
