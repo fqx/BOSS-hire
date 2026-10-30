@@ -109,12 +109,54 @@ default_job_requirements = {
 def get_job_requirements(job_requirements):
     result = dict(default_job_requirements)
     result.update(job_requirements)
+    validate_keyword_tree(result['cv_required_keywords'])
     return result
 
 
+def validate_keyword_tree(keywords):
+    """Accept keyword leaves, OR lists, and parent-to-child branch mappings."""
+    if isinstance(keywords, str):
+        if not keywords.strip():
+            raise ValueError("cv_required_keywords 中的关键词不能为空")
+    elif isinstance(keywords, list):
+        for child in keywords:
+            validate_keyword_tree(child)
+    elif isinstance(keywords, dict):
+        for parent, children in keywords.items():
+            if not isinstance(parent, str) or not parent.strip():
+                raise ValueError("cv_required_keywords 的分支名必须是非空关键词")
+            validate_keyword_tree(children)
+    else:
+        raise ValueError("cv_required_keywords 必须使用字符串、列表或对象")
+
+
+def matches_keyword_tree(keywords, resume_text):
+    """Match any complete branch; each parent and its child condition are required."""
+    if isinstance(keywords, str):
+        return keywords in resume_text
+    if isinstance(keywords, dict):
+        return not keywords or any(
+            parent in resume_text and matches_keyword_tree(children, resume_text)
+            for parent, children in keywords.items()
+        )
+    return not keywords or any(
+        matches_keyword_tree(child, resume_text) for child in keywords
+    )
+
+
 def get_matched_keywords(keywords, resume_text):
-    """Return configured keywords found in a resume card, preserving config order."""
-    return [keyword for keyword in keywords if keyword in resume_text]
+    """Return all found keywords in tree order, including incomplete branches."""
+    if isinstance(keywords, str):
+        return [keywords] if keywords in resume_text else []
+    matched = []
+    if isinstance(keywords, dict):
+        for parent, children in keywords.items():
+            matched.extend(get_matched_keywords(parent, resume_text))
+            matched.extend(get_matched_keywords(children, resume_text))
+    else:
+        for child in keywords:
+            matched.extend(get_matched_keywords(child, resume_text))
+    return matched
 
 
 def resume_diagnostics_enabled():
@@ -399,7 +441,7 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
                             if resume_dict['education'] >= job_requirements['education']: # education ok
                                 if job_requirements['off_the_job'] <= 0 or resume_dict['job_status'] == '离职-随时到岗': # off_the_job ok:
 
-                                    if not job_requirements['cv_required_keywords'] or matched_keywords:
+                                    if matches_keyword_tree(job_requirements['cv_required_keywords'], resume_text):
                                         save_resume_diagnostic(
                                             job_title, idx, resume_dict, matched_keywords, True,
                                             "passed", resume_text,

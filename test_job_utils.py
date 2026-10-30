@@ -11,6 +11,69 @@ import driver_utils
 import job_utils
 
 
+class KeywordTreeTests(unittest.TestCase):
+    def test_legacy_list_matches_any_keyword(self):
+        for text, expected in (("A", True), ("B", True), ("ABC", True), ("X", False)):
+            with self.subTest(text=text):
+                self.assertEqual(job_utils.matches_keyword_tree(["A", "B", "C"], text), expected)
+        self.assertTrue(job_utils.matches_keyword_tree([], "X"))
+
+    def test_parent_and_one_child_are_both_required(self):
+        tree = {"A": ["B", "C", "D"]}
+        for text, expected in (
+            ("AB", True), ("AC", True), ("AD", True), ("ABCD", True),
+            ("A", False), ("BCD", False), ("X", False),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(job_utils.matches_keyword_tree(tree, text), expected)
+
+    def test_nested_alternatives_require_a_complete_path(self):
+        tree = {"A": {"B": ["C", "D"]}, "E": ["F"]}
+        for text, expected in (
+            ("ABC", True), ("ABD", True), ("EF", True),
+            ("AB", False), ("AC", False), ("AE", False), ("BF", False),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(job_utils.matches_keyword_tree(tree, text), expected)
+
+    def test_multiple_parent_branches_are_alternatives(self):
+        tree = {"A": ["B", "C"], "D": ["E", "F"]}
+        for text, expected in (
+            ("AB", True), ("AC", True), ("DE", True), ("DF", True),
+            ("AD", False), ("BE", False), ("AE", False), ("DB", False),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(job_utils.matches_keyword_tree(tree, text), expected)
+
+    def test_list_can_mix_legacy_keywords_and_branches(self):
+        tree = ["X", {"A": ["B", "C"]}]
+        self.assertTrue(job_utils.matches_keyword_tree(tree, "X"))
+        self.assertTrue(job_utils.matches_keyword_tree(tree, "AB"))
+        self.assertFalse(job_utils.matches_keyword_tree(tree, "A"))
+
+    def test_empty_children_only_require_parent(self):
+        self.assertTrue(job_utils.matches_keyword_tree({"A": []}, "A"))
+        self.assertFalse(job_utils.matches_keyword_tree({"A": []}, "B"))
+
+    def test_diagnostics_include_matches_from_incomplete_branches(self):
+        tree = {"A": ["B", "C"], "D": ["E"]}
+        self.assertEqual(job_utils.get_matched_keywords(tree, "E C A"), ["A", "C", "E"])
+
+    def test_requirements_accept_legacy_and_tree_configurations(self):
+        for keywords in ([], ["A", "B"], {"A": ["B", "C"]}):
+            with self.subTest(keywords=keywords):
+                self.assertEqual(
+                    job_utils.get_job_requirements({"cv_required_keywords": keywords})["cv_required_keywords"],
+                    keywords,
+                )
+
+    def test_invalid_tree_is_rejected_when_loading_requirements(self):
+        for keywords in (None, 1, [""], {"A": None}, {"A": [False]}, {"": ["B"]}):
+            with self.subTest(keywords=keywords):
+                with self.assertRaisesRegex(ValueError, "cv_required_keywords"):
+                    job_utils.get_job_requirements({"cv_required_keywords": keywords})
+
+
 class ResumeGenderTests(unittest.TestCase):
     def test_explicit_gender_preserves_existing_fields(self):
         text = "5-7K 测试候选人 28岁 大专 离职-随时到岗 期望：销售"
