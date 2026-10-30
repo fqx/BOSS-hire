@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from pydantic import ValidationError
 
@@ -84,6 +84,49 @@ class InterviewerSchemaTests(unittest.TestCase):
             '"reason_category":"","is_qualified":true}'
         )
         self.assertTrue(result.is_qualified)
+
+
+class LLMRetryTimingTests(unittest.TestCase):
+    def test_retry_budget_and_error_result_unchanged_with_jittered_delays(self):
+        import httpx
+        error = llm_utils.openai.APIConnectionError(request=httpx.Request("POST", "http://localhost/test"))
+        for cloud in (True, False):
+            endpoint = "_call_responses_api" if cloud else "_call_chat_api"
+            with self.subTest(cloud=cloud), \
+                 patch.object(llm_utils, "_is_openai_cloud", cloud), \
+                 patch.object(llm_utils, endpoint, side_effect=error) as request, \
+                 patch.object(llm_utils, "jitter", side_effect=[7.5, 24.0]) as jitter, \
+                 patch.object(llm_utils.time, "sleep") as sleep, \
+                 patch.object(llm_utils.logger, "warning") as warning:
+                self.assertIsNone(llm_utils._call_llm(None, "image", "requirements", "overview"))
+            self.assertEqual(request.call_count, len(llm_utils.RETRY_DELAYS) + 1)
+            self.assertEqual(jitter.call_args_list, [call(10), call(30)])
+            self.assertEqual(sleep.call_args_list, [call(7.5), call(24.0)])
+            warning.assert_any_call("Retrying LLM request (attempt 2) after 7.5s...")
+            warning.assert_any_call("Retrying LLM request (attempt 3) after 24.0s...")
+
+    def test_nonretryable_errors_and_request_timeouts_do_not_sleep(self):
+        for error in (ValueError("invalid response"), llm_utils.Timeout("request timeout")):
+            with self.subTest(error=error), \
+                 patch.object(llm_utils, "_is_openai_cloud", True), \
+                 patch.object(llm_utils, "_call_responses_api", side_effect=error) as request, \
+                 patch.object(llm_utils, "jitter") as jitter, \
+                 patch.object(llm_utils.time, "sleep") as sleep:
+                self.assertIsNone(llm_utils._call_llm(None, "image", "requirements", "overview"))
+            request.assert_called_once()
+            jitter.assert_not_called()
+            sleep.assert_not_called()
+
+    def test_interrupt_propagates_without_retrying(self):
+        with patch.object(llm_utils, "_is_openai_cloud", True), \
+             patch.object(llm_utils, "_call_responses_api", side_effect=KeyboardInterrupt) as request, \
+             patch.object(llm_utils, "jitter") as jitter, \
+             patch.object(llm_utils.time, "sleep") as sleep, \
+             self.assertRaises(KeyboardInterrupt):
+            llm_utils._call_llm(None, "image", "requirements", "overview")
+        request.assert_called_once()
+        jitter.assert_not_called()
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

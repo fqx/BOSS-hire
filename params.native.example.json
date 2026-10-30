@@ -1,0 +1,15 @@
+[
+  {
+    "job_title": "市场专员",
+    "max_idx": 5,
+    "job_requirements": {
+      "age_lower_bound": 18,
+      "age_upper_bound": 65,
+      "maximum_salary": -1,
+      "education": 0,
+      "off_the_job": 0,
+      "cv_required_keywords": ["医药", "销售"],
+      "cv_requirements": "要求有医药行业销售经验。"
+    }
+  }
+]

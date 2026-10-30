@@ -7,7 +7,8 @@ import sys
 from PIL import Image
 from log_utils import logger
 import re
-from random import gauss, uniform
+from random import uniform
+from timing_utils import jitter
 from zendriver import cdp
 
 
@@ -92,18 +93,6 @@ async def _find_or_captcha(tab, text: str):
     except TimeoutError:
         await raise_if_captcha(tab, f"while waiting for '{text}'")
         raise
-
-
-def jitter(mu: float, sigma: float | None = None) -> float:
-    """Return a normally-distributed sleep duration centered on mu (sigma defaults to 25% of mu).
-
-    Always returns a positive value: at least max(0.1, mu * 0.3).
-    """
-    if sigma is None:
-        sigma = mu * 0.25
-    floor = max(0.1, mu * 0.3)
-    return max(mu + gauss(0, sigma), floor)
-
 
 
 xpath_age = '//*[@id="recommend-list"]/div/ul/li[{i}]/div/div[1]/div[2]/div[2]/div'
@@ -241,7 +230,7 @@ async def log_in(tab):
         await results[0].click()
         target_url = 'https://www.zhipin.com/web/chat/index'
         for _ in range(60):  # 30s timeout
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(jitter(0.5))
             if tab.url == target_url:
                 break
             if _url_is_captcha(tab.url):
@@ -300,7 +289,7 @@ async def goto_recommend(tab):
         )
         if found:
             break
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(jitter(0.5))
     else:
         # Check once more at the timeout boundary in case navigation completed
         # between the last poll and the end of the loop.
@@ -448,7 +437,7 @@ async def _capture_resume_strips(tab, nodes):
         for node in reversed(nodes):
             geometry = await _resume_node_value(tab, node, _RESUME_NODE_GEOMETRY, fraction, True)
             fraction = geometry['point'] / geometry['viewport']['height']
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(jitter(0.05))
         geometries = [await _resume_node_value(tab, node, _RESUME_NODE_GEOMETRY, 0, False)
                       for node in nodes]
         origin_x = origin_y = 0.0
@@ -611,14 +600,14 @@ async def _read_resume_screenshot(tab, frame_id) -> str | None:
             now = asyncio.get_running_loop().time()
             if not ready or pending or now-recent_network < 0.5:
                 previous = stable_since = None
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(jitter(0.2))
                 continue
             network_before = recent_network
             image = await _capture_resume_strips(tab, nodes)
             ready_after = await _resume_nodes_ready(tab, nodes)
             if image is None or not ready_after or pending or network_before != recent_network:
                 previous = stable_since = None
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(jitter(0.2))
                 continue
             if all(low == high for low, high in image.getextrema()):
                 return None
@@ -630,7 +619,7 @@ async def _read_resume_screenshot(tab, frame_id) -> str | None:
                 buffer = io.BytesIO()
                 image.save(buffer, format='PNG')
                 return base64.b64encode(buffer.getvalue()).decode()
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(jitter(0.25))
     finally:
         active_error = sys.exception()
         cleanup_error = None
@@ -678,7 +667,7 @@ async def get_resume(tab, idx) -> tuple[str | None, str]:
             canvas_base64 = await _read_resume_screenshot(tab, new_fids[-1])
             if canvas_base64 is not None:
                 break
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(jitter(0.2))
 
     # Extract the "经历概览" sidebar text from the recommendFrame DOM
     overview_text = await _in_frame(tab, """
@@ -734,7 +723,7 @@ async def say_hi(tab):
     if limit_hit:
         logger.warning("今日沟通数已达上限，关闭对话框并跳过当前职位。")
         await _mouse_click_css(tab, '.boss-popup__close', warn=False)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(jitter(0.5))
         raise DailyGreetingLimitReached("今日沟通数已达上限")
 
     await _frame_mouse_click_xpath(tab, xpath_i_know_after_say_hi, warn=False)
@@ -775,7 +764,7 @@ async def _close_resume_dialog(tab, greeting):
         await raise_if_captcha(tab, 'while closing resume')
         if not await _resume_is_open(tab, greeting):
             return
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(jitter(0.3))
     raise ResumeCaptureError('Resume dialog remained open after closing')
 
 
@@ -989,7 +978,7 @@ async def get_current_chat_job_title(tab) -> str:
         """)
         if result:
             return result
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(jitter(0.5))
     return ''
 
 
@@ -1013,7 +1002,7 @@ async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
             canvas_b64 = await _read_resume_screenshot(tab, fids[-1])
             if canvas_b64 is not None:
                 break
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(jitter(0.2))
 
     overview_text = await tab.evaluate("""
         (function() {
@@ -1103,7 +1092,7 @@ async def mark_unsuitable(tab, reason_category: str):
         """)
         if found:
             break
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(jitter(0.3))
 
     # Click reason item — get coords by text match, then use real mouse click
     reason_pos = await tab.evaluate(f"""
@@ -1157,7 +1146,7 @@ async def dismiss_hover_panels(tab):
     await tab.send(cdp.input_.dispatch_mouse_event(
         type_='mouseMoved', x=300, y=700
     ))
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(jitter(0.3))
 
 
 async def close_popover(tab):
@@ -1166,4 +1155,4 @@ async def close_popover(tab):
         clicked = await _mouse_click_css(tab, '.iboss-close', warn=False)
         if not clicked:
             break
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(jitter(0.5))
