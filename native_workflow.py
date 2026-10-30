@@ -6,8 +6,14 @@ import time
 import job_utils
 import llm_utils
 from log_utils import logger
-from timing_utils import jitter
-from native_driver import NativeDriverError, NativeStaleElementError
+from timing_utils import exponential_backoff, jitter
+from native_driver import (
+    NativeDailyLimitError, NativeDriverError, NativeNetworkError, NativeStaleElementError,
+)
+
+
+NETWORK_BANNER_GRACE = 10.0
+NO_LLM_SETTLE_DELAY = 1.0
 
 
 def label(node):
@@ -51,7 +57,9 @@ class NativeSession:
         for node in nodes:
             text = label(node)
             if not allow_network_error and node.role == "AXButton" and text.startswith("网络连接失败"):
-                raise NativeDriverError("BOSS 网络连接失败，请先恢复客户端网络")
+                raise NativeNetworkError("BOSS 网络连接失败，请先恢复客户端网络")
+            if text == "购买聊天加油包" or text.startswith("该职位今日查看数已达上限"):
+                raise NativeDailyLimitError("BOSS 今日查看/沟通额度已达上限，请停止并稍后重试")
             if text in ("安全验证", "人脸验证", "身份验证", "账号异常", "登录/注册", "验证码登录"):
                 raise NativeDriverError(f"BOSS 需要人工处理：{text}")
         return nodes
@@ -60,8 +68,37 @@ class NativeSession:
         deadline = time.monotonic() + timeout
         previous = None
         stable_since = None
+        network_deadline = None
+        network_attempt = 0
+        network_warned = False
         while time.monotonic() < deadline:
-            nodes = await self.snapshot(allow_network_error=allow_network_error)
+            try:
+                nodes = await self.snapshot(allow_network_error=allow_network_error)
+            except NativeNetworkError:
+                # A banner can appear briefly right after a transition. Waiting
+                # it out is safe because this loop never repeats a write; a
+                # persistent banner still stops the workflow.
+                now = time.monotonic()
+                if network_deadline is None:
+                    network_deadline = now + NETWORK_BANNER_GRACE
+                if not network_warned:
+                    logger.warning("BOSS 网络连接失败横幅出现，指数退避等待后重试（只读轮询）")
+                    network_warned = True
+                if now >= network_deadline:
+                    raise
+                delay = min(exponential_backoff(network_attempt, base=0.5, cap=4.0),
+                            network_deadline - now)
+                network_attempt += 1
+                if delay <= 0:
+                    raise
+                previous = stable_since = None
+                await asyncio.sleep(delay)
+                continue
+            if network_warned:
+                logger.info("网络连接失败横幅已消失，继续等待页面")
+                network_warned = False
+            network_deadline = None
+            network_attempt = 0
             signature = tuple((n.path, n.role, label(n), n.value,
                                tuple(round(n.rect[k], 1) for k in ("x", "y", "width", "height")))
                               for n in nodes)
@@ -112,16 +149,31 @@ class NativeSession:
                     raise
                 logger.warning("返回操作未生效，确认仍在原页面后重试一次")
 
-    async def return_to_candidates(self):
-        nodes = await self.snapshot()
+    async def return_to_candidates(self, *, allow_network_error=False):
+        navigation_options = {"allow_network_error": True} if allow_network_error else {}
+        nodes = await self.snapshot(**navigation_options)
         if is_candidate_list(nodes):
             return nodes
         if not is_resume(nodes) and not has_label(nodes, "求简历"):
+            # A persistent connection banner can replace the detail tree with
+            # a list root. Recovery is navigation-only: use the 牛人 tab or one
+            # leading back arrow, then require the candidate list.
+            tabs = [n for n in nodes if n.role == "AXButton" and label(n) == "牛人"
+                    and "AXPress" in n.actions]
+            if allow_network_error and len(tabs) == 1:
+                await self.driver.perform(tabs[0], "press")
+                return await self.wait(is_candidate_list, "候选人列表", **navigation_options)
+            if allow_network_error:
+                try:
+                    return await self.back(is_candidate_list, "候选人列表", **navigation_options)
+                except NativeDriverError:
+                    pass
             raise NativeDriverError("当前不是简历或会话页面，无法返回候选人列表")
-        nodes = await self.back(lambda ns: is_resume(ns) or is_candidate_list(ns), "简历或候选人列表")
+        nodes = await self.back(lambda ns: is_resume(ns) or is_candidate_list(ns),
+                                "简历或候选人列表", **navigation_options)
         if is_candidate_list(nodes):
             return nodes
-        return await self.back(is_candidate_list, "候选人列表")
+        return await self.back(is_candidate_list, "候选人列表", **navigation_options)
 
     async def select_job(self, job_title, selector_job_title=None):
         # Message delivery can be offline while recommendations remain usable.
@@ -152,13 +204,13 @@ class NativeSession:
         await self.wait(
             lambda ns: is_candidate_list(ns) and any(
                 n.role == "AXButton" and label(n) == title and n.value == "选中" for n in ns
-            ), "岗位切换", stable_for=1.0,
+            ), "岗位切换", timeout=30, stable_for=1.0,
         )
         await self.press_label("推荐")
         await self.wait(
             lambda ns: is_candidate_list(ns) and any(
                 n.role == "AXButton" and label(n) == title and n.value == "选中" for n in ns
-            ), "推荐候选人", stable_for=1.0,
+            ), "推荐候选人", timeout=30, stable_for=1.0,
         )
         logger.info("已选职位：%s", title)
         return await self.apply_history_filter(title)
@@ -348,6 +400,60 @@ def parse_native_resume(text):
     return parsed
 
 
+CARD_EDUCATION_LEVELS = {
+    "初中及以下": 1, "高中": 2, "中专/中技": 3, "大专": 4,
+    "本科": 5, "硕士": 6, "博士": 7,
+}
+CARD_JOB_STATUSES = ("离职-随时到岗", "在职-月内到岗", "在职-考虑机会", "在职-暂不考虑")
+
+
+def parse_card_fields(text):
+    """Parse the fields the native list card exposes before opening a detail."""
+    salary = None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)\s*(万元|元|[kK])", text)
+    if match:
+        scale = {"万元": 10000, "元": 1, "k": 1000}[match[3].lower()]
+        salary = int(float(match[1]) * scale)
+    elif "面议" in text:
+        salary = -1
+    age_match = re.search(r"(\d+)\s*岁", text)
+    education_match = re.search(r"初中及以下|高中|中专/中技|大专|本科|硕士|博士", text)
+    status_match = re.search("|".join(CARD_JOB_STATUSES), text)
+    gender_match = re.search(r"(?:^|[,，\s])性别\s*[:：]\s*([男女])(?=[,，\s]|$)", text)
+    return {
+        "age": int(age_match.group(1)) if age_match else None,
+        "salary_lower_bound": salary,
+        "education": CARD_EDUCATION_LEVELS.get(education_match.group(0)) if education_match else None,
+        "job_status": status_match.group(0) if status_match else None,
+        "gender": gender_match.group(1) if gender_match else None,
+    }
+
+
+def prefilter_card(text, requirements):
+    """Reject locally provable failures from the card; unknown fields stay for the detail."""
+    fields = parse_card_fields(text)
+    age = fields["age"]
+    if age is not None and not requirements["age_lower_bound"] <= age <= requirements["age_upper_bound"]:
+        return "age"
+    salary = fields["salary_lower_bound"]
+    if salary is not None and requirements["maximum_salary"] > 0 and not (
+        0 < salary < requirements["maximum_salary"]
+    ):
+        return "salary"
+    education = fields["education"]
+    if education is not None and education < requirements["education"]:
+        return "education"
+    if (requirements["off_the_job"] > 0 and fields["job_status"] is not None
+            and fields["job_status"] != "离职-随时到岗"):
+        return "employment_status"
+    if (requirements["gender"] is not None and fields["gender"] is not None
+            and fields["gender"] != requirements["gender"]):
+        return "gender"
+    if not job_utils.matches_keyword_tree(requirements["cv_required_keywords"], text):
+        return "keywords"
+    return "passed"
+
+
 def prefilter_resume(text, requirements):
     parsed = parse_native_resume(text)
     if parsed["age"] is None or not requirements["age_lower_bound"] <= parsed["age"] <= requirements["age_upper_bound"]:
@@ -394,14 +500,16 @@ async def confirm_initial_greeting(session, chat_nodes):
     await session.wait(delivered, "自动首次招呼送达确认（未确认时停止，不重复发送）")
 
 
-async def loop_recommend(session, max_idx, requirements, client, stats, job_title, allow_contact=False):
+async def loop_recommend(session, max_idx, requirements, client, stats, job_title,
+                         allow_contact=False, rejection_reviewer=None):
     counters = stats.setdefault(job_title, {})
-    for key in ("viewed", "qualified", "greeted", "scanned", "card_prefilter_skipped"):
+    for key in ("viewed", "qualified", "greeted", "scanned",
+                "card_prefilter_skipped", "card_field_skipped"):
         counters.setdefault(key, 0)
     seen = set()
     stale_opens = 0
     while counters["scanned"] < max_idx:
-        nodes = await session.wait(is_candidate_list, "候选人列表")
+        nodes = await session.wait(is_candidate_list, "候选人列表", allow_network_error=True)
         cards = session.candidate_cards(nodes)
         if not cards and not any(has_label(nodes, text) for text in ("暂无推荐牛人", "暂无合适牛人", "暂无推荐")):
             raise NativeDriverError("未识别到推荐候选人卡片，停止处理")
@@ -412,7 +520,8 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
                 break
             before = tuple((text, round(n.rect["y"], 1)) for n, text in cards)
             await session.driver.perform(scrolls[0], "scrollDown")
-            nodes = await session.wait(is_candidate_list, "候选人翻页", stable_for=1.0)
+            nodes = await session.wait(is_candidate_list, "候选人翻页", stable_for=1.0,
+                                       allow_network_error=True)
             if tuple((text, round(n.rect["y"], 1)) for n, text in session.candidate_cards(nodes)) == before:
                 break
             continue
@@ -421,16 +530,25 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
             seen.add(card_text)
             counters["scanned"] += 1
             continue
-        if not job_utils.matches_keyword_tree(requirements["cv_required_keywords"], card_text):
+        card_stage = prefilter_card(card_text, requirements)
+        if card_stage != "passed":
             seen.add(card_text)
             counters["scanned"] += 1
-            counters["card_prefilter_skipped"] += 1
+            if card_stage == "keywords":
+                counters["card_prefilter_skipped"] += 1
+            else:
+                counters["card_field_skipped"] += 1
+            card_fields = parse_card_fields(card_text)
             job_utils.save_resume_diagnostic(
-                job_title, counters["scanned"], job_utils.parse_resume(card_text),
+                job_title, counters["scanned"], card_fields,
                 job_utils.get_matched_keywords(requirements["cv_required_keywords"], card_text),
-                False, "card_keywords", card_text,
+                False, f"card_{card_stage}", card_text,
             )
-            logger.info("推荐卡片关键词未通过，未打开详情：职位=%s #%s", job_title, counters["scanned"])
+            logger.info(
+                "推荐卡片初筛未通过（%s），未打开详情：职位=%s #%s；卡片薪资=%s，年龄=%s，学历=%s",
+                card_stage, job_title, counters["scanned"], card_fields["salary_lower_bound"],
+                card_fields["age"], card_fields["education"],
+            )
             continue
         try:
             await session.driver.perform(node, "press")
@@ -450,8 +568,14 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
             text = await session.read_resume()
         except TimeoutError:
             # Continue only after proving the detail page was actually closed.
-            await session.return_to_candidates()
+            await session.return_to_candidates(allow_network_error=True)
             logger.warning("简历加载超时，已返回列表，跳过当前候选人")
+            continue
+        except NativeNetworkError:
+            # A stale banner can outlive the read grace. The read is not
+            # retried; leave the detail and skip only after proving the list.
+            await session.return_to_candidates(allow_network_error=True)
+            logger.warning("简历读取遇到网络横幅，已确认返回列表，跳过当前候选人")
             continue
         counters["viewed"] += 1
         stage = prefilter_resume(text, requirements)
@@ -482,9 +606,71 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
                     logger.info("候选人符合要求；只读模式，未打招呼")
             elif result is None:
                 logger.warning("LLM 评估失败，跳过当前候选人")
+            elif allow_contact:
+                # 默认按模型结论自动标记；显式开启复核时逐人确认，未获确认的
+                # 结论保留待复核，不把允许联系当作自动淘汰授权。
+                from native_greetings import (
+                    UNSUITABLE_REASON_HEADERS, is_marked_unsuitable, mark_unsuitable,
+                    open_detail_unsuitable_panel, platform_reason_label,
+                )
+
+                approved = True
+                if rejection_reviewer is not None:
+                    approved = await rejection_reviewer(job_title, result)
+                if approved is True:
+                    current = await session.snapshot()
+                    if not is_resume(current) or page_identity(current) != assessed_page:
+                        raise NativeDriverError("评估期间简历页面或候选人发生变化，停止标记")
+                    assessed_page_now = page_identity(current)
+
+                    def verify_resume(ns):
+                        # 原因面板覆盖详情页时，以唯一面板标题为状态锚点；
+                        # 其他页面状态必须仍是刚才评估的同一份简历。
+                        if any(has_label(ns, text) for text in UNSUITABLE_REASON_HEADERS):
+                            return
+                        if not is_resume(ns) or page_identity(ns) != assessed_page_now:
+                            raise NativeDriverError("不合适操作期间简历页面或候选人发生变化，停止提交")
+
+                    def marked_or_left_detail(ns):
+                        # 真实客户端提交后会返回推荐列表；列表或明确标记均视为
+                        # 本次已确认提交。其他结果继续等待，超时不再重复提交。
+                        return is_marked_unsuitable(ns) or is_candidate_list(ns)
+
+                    def advanced_to_next_resume(ns):
+                        # Some client versions open the next candidate directly
+                        # after a confirmed rejection instead of returning to list.
+                        return is_resume(ns) and page_identity(ns) != assessed_page_now
+
+                    await mark_unsuitable(
+                        session, result.reason_category,
+                        verify_page=verify_resume, success_check=marked_or_left_detail,
+                        open_panel=open_detail_unsuitable_panel,
+                        map_reason=lambda ns: platform_reason_label(ns, result.reason_category),
+                        advance_check=advanced_to_next_resume,
+                    )
+                    counters["marked_unsuitable"] = counters.get("marked_unsuitable", 0) + 1
+                    logger.info("推荐候选人不符合要求，已标记不合适：职位=%s", job_title)
+                else:
+                    counters["awaiting_review"] = counters.get("awaiting_review", 0) + 1
+                    counters.setdefault("pending_rejections", []).append({
+                        "reason": result.reason,
+                        "reason_category": result.reason_category,
+                        "candidate": card_text,
+                    })
+                    logger.info("推荐候选人淘汰结论待人工复核，未标记不合适：职位=%s", job_title)
+            else:
+                logger.info("候选人不符合要求；只读模式，未标记不合适")
         else:
-            logger.info("预筛未通过：%s", stage)
-        await session.return_to_candidates()
+            logger.info(
+                "预筛未通过：%s；职位=%s #%s；期望薪资=%s-%s，年龄=%s，学历=%s，状态=%s",
+                stage, job_title, counters["scanned"], parsed["salary_lower_bound"],
+                parsed["salary_upper_bound"], parsed["age"], parsed["education"],
+                parsed["job_status"],
+            )
+            # Even when the model is not called, give the client time to settle
+            # after closing a detail before opening the next candidate.
+            await asyncio.sleep(jitter(NO_LLM_SETTLE_DELAY))
+        await session.return_to_candidates(allow_network_error=True)
     return counters["viewed"], counters["greeted"]
 
 
@@ -502,4 +688,5 @@ async def run_native(job_configs, client, stats, *, allow_contact=False,
             requirements = job_utils.get_job_requirements(params["job_requirements"])
             await session.select_job(params["job_title"], requirements["selector_job_title"])
             await loop_recommend(session, params.get("max_idx", 120), requirements,
-                                 client, stats, params["job_title"], allow_contact)
+                                 client, stats, params["job_title"], allow_contact,
+                                 rejection_reviewer=rejection_reviewer)

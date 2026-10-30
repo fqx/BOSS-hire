@@ -244,8 +244,42 @@ class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_network_banner_still_stops_default_snapshot(self):
         banner = node((0,), "网络连接失败，请检查网络", "AXButton")
         session = native_workflow.NativeSession(SimpleNamespace(snapshot=AsyncMock(return_value=[banner])))
-        with self.assertRaisesRegex(NativeDriverError, "网络连接失败"):
+        with self.assertRaisesRegex(native_workflow.NativeNetworkError, "网络连接失败"):
             await session.snapshot()
+
+    async def test_daily_limit_dialog_stops_snapshot(self):
+        for text in ("购买聊天加油包", "该职位今日查看数已达上限，付费解锁上限"):
+            with self.subTest(text=text):
+                session = native_workflow.NativeSession(
+                    SimpleNamespace(snapshot=AsyncMock(return_value=[node((0,), text, "AXStaticText")]))
+                )
+                with self.assertRaisesRegex(native_workflow.NativeDailyLimitError, "上限"):
+                    await session.snapshot(allow_network_error=True)
+
+    async def test_wait_retries_transient_network_banner_then_succeeds(self):
+        banner = node((0,), "网络连接失败，请检查网络", "AXButton")
+        target = node((1,), "目标")
+        driver = SimpleNamespace(snapshot=AsyncMock(side_effect=[[banner], [banner], [target]]))
+        session = native_workflow.NativeSession(driver)
+        with patch.object(native_workflow, "jitter", return_value=0.01), \
+             patch.object(native_workflow, "exponential_backoff", return_value=0.01), \
+             patch.object(native_workflow, "NETWORK_BANNER_GRACE", 1.0):
+            nodes = await session.wait(
+                lambda ns: native_workflow.has_label(ns, "目标"), "目标页面", timeout=2, stable_for=0,
+            )
+        self.assertEqual(nodes, [target])
+        self.assertEqual(driver.snapshot.await_count, 3)
+
+    async def test_wait_stops_after_transient_network_banner_grace(self):
+        banner = node((0,), "网络连接失败，请检查网络", "AXButton")
+        session = native_workflow.NativeSession(
+            SimpleNamespace(snapshot=AsyncMock(return_value=[banner]))
+        )
+        with patch.object(native_workflow, "jitter", return_value=0.01), \
+             patch.object(native_workflow, "exponential_backoff", return_value=0.01), \
+             patch.object(native_workflow, "NETWORK_BANNER_GRACE", 0.05), \
+             self.assertRaisesRegex(native_workflow.NativeNetworkError, "网络连接失败"):
+            await session.wait(lambda ns: True, "目标页面", timeout=2, stable_for=0)
 
     async def test_navigation_exception_only_allows_network_error(self):
         banner = node((0,), "网络连接失败，请检查网络", "AXButton")
@@ -255,6 +289,28 @@ class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
         driver.snapshot.return_value = [banner, node((1,), "人脸验证")]
         with self.assertRaisesRegex(NativeDriverError, "人工处理"):
             await session.snapshot(allow_network_error=True)
+
+    async def test_return_to_candidates_recovers_from_messages_root_with_banner(self):
+        messages = [node((0,), "消息"), node((1,), "牛人", "AXButton", ("AXPress",))]
+        listed = [node((0,), "牛人"), node((1,), "推荐")]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.snapshot = AsyncMock(return_value=messages)
+        session.wait = AsyncMock(return_value=listed)
+        nodes = await session.return_to_candidates(allow_network_error=True)
+        self.assertEqual(nodes, listed)
+        session.driver.perform.assert_awaited_once_with(messages[1], "press")
+        self.assertTrue(session.wait.await_args.kwargs["allow_network_error"])
+
+    async def test_return_to_candidates_can_allow_network_banner_for_navigation(self):
+        resume = [node((0,), "求职期望"), node((1,), "工作经历")]
+        listed = [node((0,), "牛人"), node((1,), "推荐")]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.snapshot = AsyncMock(return_value=resume)
+        session.back = AsyncMock(return_value=listed)
+        nodes = await session.return_to_candidates(allow_network_error=True)
+        self.assertEqual(nodes, listed)
+        session.snapshot.assert_awaited_once_with(allow_network_error=True)
+        self.assertTrue(session.back.await_args.kwargs["allow_network_error"])
 
     async def test_select_job_requires_unique_exact_native_label(self):
         base = [node((0,), "牛人", "AXButton"), node((1,), "推荐", "AXButton")]
@@ -611,8 +667,56 @@ class NativeRecommendationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["市场专员"]["scanned"], 1)
         self.assertEqual(stats["市场专员"]["card_prefilter_skipped"], 1)
         diagnostic.assert_called_once_with(
-            "市场专员", 1, job_utils.parse_resume(card_text), ["医药"], False, "card_keywords", card_text,
+            "市场专员", 1, native_workflow.parse_card_fields(card_text), ["医药"], False,
+            "card_keywords", card_text,
         )
+
+    async def test_card_field_failure_skips_detail_without_model(self):
+        cases = [
+            ("测试，40岁，大专，医药销售", {"cv_required_keywords": ["医药"], "age_upper_bound": 35}, "age"),
+            ("测试，30岁，大专，15000-20000元，医药销售",
+             {"cv_required_keywords": ["医药"], "maximum_salary": 12000}, "salary"),
+            ("测试，30岁，高中，医药销售",
+             {"cv_required_keywords": ["医药"], "education": 4}, "education"),
+            ("测试，30岁，大专，在职-月内到岗，医药销售",
+             {"cv_required_keywords": ["医药"], "off_the_job": 1}, "employment_status"),
+            ("测试，30岁，大专，性别：女，医药销售",
+             {"cv_required_keywords": ["医药"], "gender": "男"}, "gender"),
+        ]
+        for card_text, overrides, stage in cases:
+            with self.subTest(stage=stage):
+                session = self.make_session(resume="不应读取")
+                session.candidate_cards.return_value = [(self.card, card_text)]
+                stats = {}
+                with patch.object(job_utils, "save_resume_diagnostic") as diagnostic, \
+                     patch.object(native_workflow.llm_utils, "is_qualified_text_result") as assess:
+                    self.assertEqual(await native_workflow.loop_recommend(
+                        session, 1, job_utils.get_job_requirements(overrides), None, stats, "市场专员",
+                    ), (0, 0))
+                session.driver.perform.assert_not_awaited()
+                session.read_resume.assert_not_awaited()
+                assess.assert_not_called()
+                self.assertEqual(stats["市场专员"]["card_field_skipped"], 1)
+                self.assertEqual(stats["市场专员"]["card_prefilter_skipped"], 0)
+                self.assertEqual(diagnostic.call_args.args[5], f"card_{stage}")
+
+    async def test_card_missing_fields_still_open_for_full_resume_check(self):
+        session = self.make_session(resume="30岁 大专\n求职期望\n面议\n工作经历\n医药销售")
+        session.candidate_cards.return_value = [(self.card, "测试，30岁，大专，医药销售")]
+        stats = {}
+        requirements = job_utils.get_job_requirements({
+            "cv_required_keywords": ["医药"], "maximum_salary": 12000, "off_the_job": 1,
+        })
+        with patch.object(job_utils, "save_resume_diagnostic"), \
+             patch.object(native_workflow.llm_utils, "is_qualified_text_result") as assess:
+            self.assertEqual(await native_workflow.loop_recommend(
+                session, 1, requirements, None, stats, "市场专员",
+            ), (1, 0))
+        session.read_resume.assert_awaited_once()
+        session.return_to_candidates.assert_awaited_once()
+        assess.assert_not_called()
+        self.assertEqual(stats["市场专员"]["viewed"], 1)
+        self.assertEqual(stats["市场专员"]["card_field_skipped"], 0)
 
     async def test_failed_card_does_not_stop_next_matching_candidate(self):
         session = self.make_session(resume="32岁 大专\n求职期望\n面议\n工作经历\n医药销售")
@@ -678,6 +782,83 @@ class NativeRecommendationTests(unittest.IsolatedAsyncioTestCase):
         session.return_to_candidates.assert_awaited_once()
         session.driver.perform.assert_awaited_once_with(self.card, "press")
 
+    async def test_unqualified_recommendation_auto_marks_on_the_evaluated_resume(self):
+        resume = "32岁 大专\n求职期望\n面议\n工作经历\n医药销售"
+        session = self.make_session(resume=resume)
+        stats = {}
+        result = SimpleNamespace(is_qualified=False, reason_category="过往经历不符", reason="完整评估理由")
+        with patch.object(native_workflow.llm_utils, "is_qualified_text_result", return_value=result), \
+             patch.object(job_utils, "save_resume_diagnostic"), \
+             patch("native_greetings.mark_unsuitable", new=AsyncMock()) as mark:
+            viewed, greeted = await native_workflow.loop_recommend(
+                session, 1, job_utils.get_job_requirements({"cv_requirements": "医药销售"}),
+                "client", stats, "市场专员", allow_contact=True,
+            )
+        self.assertEqual((viewed, greeted), (1, 0))
+        mark.assert_awaited_once()
+        self.assertEqual(mark.await_args.args, (session, "过往经历不符"))
+        self.assertEqual(set(mark.await_args.kwargs),
+                         {"verify_page", "success_check", "open_panel", "map_reason", "advance_check"})
+        self.assertEqual(stats["市场专员"]["marked_unsuitable"], 1)
+        self.assertNotIn("awaiting_review", stats["市场专员"])
+        session.return_to_candidates.assert_awaited_once()
+
+    async def test_unqualified_recommendation_review_denial_queues_without_marking(self):
+        resume = "32岁 大专\n求职期望\n面议\n工作经历\n医药销售"
+        session = self.make_session(resume=resume)
+        stats = {}
+        reviewer = AsyncMock(return_value=False)
+        result = SimpleNamespace(is_qualified=False, reason_category="过往经历不符", reason="完整评估理由")
+        with patch.object(native_workflow.llm_utils, "is_qualified_text_result", return_value=result), \
+             patch.object(job_utils, "save_resume_diagnostic"), \
+             patch("native_greetings.mark_unsuitable", new=AsyncMock()) as mark:
+            await native_workflow.loop_recommend(
+                session, 1, job_utils.get_job_requirements({"cv_requirements": "医药销售"}),
+                "client", stats, "市场专员", allow_contact=True, rejection_reviewer=reviewer,
+            )
+        reviewer.assert_awaited_once_with("市场专员", result)
+        mark.assert_not_awaited()
+        self.assertEqual(stats["市场专员"]["awaiting_review"], 1)
+        self.assertEqual(stats["市场专员"]["pending_rejections"], [{
+            "reason": result.reason,
+            "reason_category": "过往经历不符",
+            "candidate": session.candidate_cards.return_value[0][1],
+        }])
+
+    async def test_unqualified_recommendation_read_only_does_not_mark(self):
+        resume = "32岁 大专\n求职期望\n面议\n工作经历\n医药销售"
+        session = self.make_session(resume=resume)
+        stats = {}
+        result = SimpleNamespace(is_qualified=False, reason_category="过往经历不符")
+        with patch.object(native_workflow.llm_utils, "is_qualified_text_result", return_value=result), \
+             patch.object(job_utils, "save_resume_diagnostic"), \
+             patch("native_greetings.mark_unsuitable", new=AsyncMock()) as mark:
+            await native_workflow.loop_recommend(
+                session, 1, job_utils.get_job_requirements({"cv_requirements": "医药销售"}),
+                "client", stats, "市场专员", allow_contact=False,
+            )
+        mark.assert_not_awaited()
+        self.assertNotIn("marked_unsuitable", stats["市场专员"])
+        self.assertNotIn("awaiting_review", stats["市场专员"])
+
+    async def test_unqualified_recommendation_stops_if_page_changed_after_evaluation(self):
+        resume = "32岁 大专\n求职期望\n面议\n工作经历\n医药销售"
+        session = self.make_session(resume=resume)
+        first = [node((0,), "求职期望"), node((1,), "工作经历"), node((2,), "甲先生")]
+        changed = [node((0,), "求职期望"), node((1,), "工作经历"), node((2,), "乙先生")]
+        session.snapshot.side_effect = [first, changed]
+        result = SimpleNamespace(is_qualified=False, reason_category="过往经历不符")
+        with patch.object(native_workflow.llm_utils, "is_qualified_text_result", return_value=result), \
+             patch.object(job_utils, "save_resume_diagnostic"), \
+             patch("native_greetings.mark_unsuitable", new=AsyncMock()) as mark, \
+             self.assertRaisesRegex(NativeDriverError, "候选人发生变化"):
+            await native_workflow.loop_recommend(
+                session, 1, job_utils.get_job_requirements({"cv_requirements": "医药销售"}),
+                "client", {}, "市场专员", allow_contact=True,
+            )
+        mark.assert_not_awaited()
+        session.return_to_candidates.assert_not_awaited()
+
     async def test_list_refresh_before_press_re_resolves_without_consuming_candidate(self):
         from native_driver import NativeStaleElementError
         session = self.make_session(resume="年龄未提供\n工作经历")
@@ -721,6 +902,18 @@ class NativeRecommendationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, (0, 0))
         session.return_to_candidates.assert_awaited_once()
         session.press_label.assert_not_awaited()
+
+    async def test_resume_network_banner_returns_to_list_and_skips(self):
+        session = self.make_session(resume="unused")
+        session.read_resume.side_effect = native_workflow.NativeNetworkError("BOSS 网络连接失败")
+        stats = {}
+        with patch.object(job_utils, "save_resume_diagnostic"):
+            self.assertEqual(await native_workflow.loop_recommend(
+                session, 1, job_utils.get_job_requirements({}), None, stats, "市场专员",
+            ), (0, 0))
+        session.return_to_candidates.assert_awaited_once_with(allow_network_error=True)
+        self.assertEqual(stats["市场专员"]["scanned"], 1)
+        self.assertEqual(stats["市场专员"]["viewed"], 0)
 
     async def test_failed_timeout_return_stops(self):
         session = self.make_session(error=TimeoutError("loading"))
@@ -955,7 +1148,8 @@ class NativeRunTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(events[-1][0], "screened")
             await asyncio.sleep(0)
             events.append(("selected", title))
-        async def screen(session, maximum, requirements, client, stats, title, allow_contact):
+        async def screen(session, maximum, requirements, client, stats, title, allow_contact,
+                         rejection_reviewer=None):
             self.assertEqual(events[-1], ("selected", title))
             await asyncio.sleep(0)
             events.append(("screened", title))
@@ -976,7 +1170,7 @@ class NativeRunTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(recommend.await_args_list, [
             call(session, config.get("max_idx", 120), job_utils.get_job_requirements(config["job_requirements"]),
-                 "client", stats, config["job_title"], False) for config in configs
+                 "client", stats, config["job_title"], False, rejection_reviewer=None) for config in configs
         ])
         self.assertEqual(configs, original)
         greetings.assert_not_awaited()
@@ -1016,6 +1210,7 @@ class NativeRunTests(unittest.IsolatedAsyncioTestCase):
         greetings.assert_not_awaited()
         recommend.assert_awaited_once_with(
             session, 2, job_utils.get_job_requirements({}), "client", stats, "市场专员", False,
+            rejection_reviewer=None,
         )
 
 

@@ -18,6 +18,14 @@ class NativeStaleElementError(NativeDriverError):
     """The bridge rejected an outdated target before performing its action."""
 
 
+class NativeNetworkError(NativeDriverError):
+    """The client shows a network-failure banner; read-only polling may retry."""
+
+
+class NativeDailyLimitError(NativeDriverError):
+    """The client reached its daily view or communication limit."""
+
+
 @dataclass(frozen=True)
 class AXNode:
     path: tuple[int, ...]

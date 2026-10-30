@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import main
 import native_workflow
+from native_driver import NativeDailyLimitError
 
 
 class NativeEntrypointTests(unittest.IsolatedAsyncioTestCase):
@@ -85,6 +86,24 @@ class NativeEntrypointTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(run.await_args.kwargs["allow_contact"])
         self.assertNotIn("rejection_reviewer", run.await_args.kwargs)
 
+    def test_local_model_client_bypasses_system_proxy(self):
+        with patch.object(main, "OPENAI_BASE_URL", "http://localhost:8504/v1"), \
+             patch.object(main, "OpenAI") as client, \
+             patch.object(main.httpx, "Client") as http_client:
+            result = main.create_openai_client()
+        http_client.assert_called_once_with(trust_env=False)
+        self.assertIs(result, client.return_value)
+        self.assertIs(client.call_args.kwargs["http_client"], http_client.return_value)
+        self.assertEqual(client.call_args.kwargs["base_url"], "http://localhost:8504/v1")
+
+    def test_cloud_model_client_keeps_default_proxy_handling(self):
+        with patch.object(main, "OPENAI_BASE_URL", "https://api.openai.com/v1"), \
+             patch.object(main, "OpenAI") as client, \
+             patch.object(main.httpx, "Client") as http_client:
+            main.create_openai_client()
+        http_client.assert_not_called()
+        self.assertNotIn("http_client", client.call_args.kwargs)
+
     async def test_native_mode_routes_flags_and_does_not_launch_browser(self):
         args = SimpleNamespace(backend="native", allow_contact=False, config=None, review_rejections=False)
         configs = [{"job_title": "市场专员", "job_requirements": {}}]
@@ -102,6 +121,20 @@ class NativeEntrypointTests(unittest.IsolatedAsyncioTestCase):
             greetings=main.ENABLE_GREETINGS_LOOP, recommend=main.ENABLE_RECOMMEND_LOOP,
         )
         final.assert_called_once()
+
+    async def test_daily_limit_stops_cleanly_and_reports_statistics(self):
+        args = SimpleNamespace(backend="native", allow_contact=True, config=None, review_rejections=False)
+        with patch.object(main, "get_arguments", return_value=args), \
+             patch.object(main, "get_params", return_value=[{"job_title": "主播", "job_requirements": {}}]), \
+             patch.object(main, "create_openai_client", return_value="client"), \
+             patch.object(main.wakelock_utils, "WakeLock", return_value=nullcontext()), \
+             patch.object(native_workflow, "run_native",
+                          new=AsyncMock(side_effect=NativeDailyLimitError("limit"))), \
+             patch.object(main, "log_final_stats") as final, \
+             patch.object(main.log_utils.logger, "warning") as warning:
+            await main.main()
+        final.assert_called_once()
+        self.assertIn("每日查看/沟通上限", warning.call_args.args[0])
 
     async def test_native_errors_propagate_and_still_report_statistics(self):
         args = SimpleNamespace(backend="native", allow_contact=False, config=None, review_rejections=False)

@@ -3,10 +3,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from native_driver import AXNode, NativeDriverError
+from native_driver import AXNode, NativeDriverError, NativeNetworkError
 from native_greetings import (
     GREETING_QUALIFIED_MSG, SAVED_GREETING_MSG, chat_position, greeting_rows, loop_greetings,
-    mark_unsuitable, match_greeting_job, send_qualified_message, send_saved_greeting,
+    mark_unsuitable, match_greeting_job, open_detail_unsuitable_panel, platform_reason_label,
+    send_qualified_message, send_saved_greeting,
 )
 
 
@@ -29,6 +30,17 @@ REASON_PANEL = CHAT + [node("选择原因，为您优化推荐", "AXStaticText")
 CONFIRM_BUTTON = node("确认", path=(6,))
 REASON_CONFIRM = CHAT + [replace(REASON, value="选中"), CONFIRM_BUTTON]
 MARKED = CHAT + [node("已标记不合适", "AXStaticText")]
+REAL_PANEL = [
+    node("选择原因，推荐更合适牛人", "AXStaticText", path=(0, 1, 0, 0)),
+    node("牛人距离远", "AXStaticText", path=(0, 1, 0, 2, 0, 0)),
+    node("不考虑 中专/中技", "AXStaticText", path=(0, 1, 0, 2, 1, 0)),
+    node("期望薪资偏高", "AXStaticText", path=(0, 1, 0, 2, 2, 0)),
+    node("年龄不合适", "AXStaticText", path=(0, 1, 0, 2, 3, 0)),
+    node("工作经历和市场推广/地推无关", "AXStaticText", path=(0, 1, 0, 2, 4, 0)),
+    node("活跃度低", "AXStaticText", path=(0, 1, 0, 2, 5, 0)),
+    node("重复推荐", "AXStaticText", path=(0, 1, 0, 2, 6, 0)),
+    node("其他原因", "AXStaticText", path=(0, 1, 0, 2, 7, 0)),
+]
 GENERATED_MESSAGE = "您好，看到您有直播带货和健康产品讲解经验，与我们的私域电商主播岗位方向相符，想了解您是否有兴趣进一步沟通，方便分享最新简历吗？"
 
 
@@ -125,6 +137,143 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         # The readiness predicate itself must reject this state before submission.
         self.assertFalse(session.wait.await_args.args[0](wrong_confirm))
 
+    async def test_mark_with_resume_binding_accepts_candidate_list_as_success(self):
+        panel = RESUME + [node("选择原因，为您优化推荐", "AXStaticText"), REASON]
+        confirm_page = RESUME + [replace(REASON, value="选中"), CONFIRM_BUTTON]
+        candidate_list = [node("牛人", "AXStaticText"), node("推荐", "AXStaticText")]
+        session = SimpleNamespace(
+            snapshot=AsyncMock(side_effect=[RESUME, confirm_page]),
+            press_label=AsyncMock(), driver=SimpleNamespace(perform=AsyncMock()),
+            wait=AsyncMock(side_effect=[panel, confirm_page, candidate_list]),
+        )
+        await mark_unsuitable(
+            session, "过往经历不符",
+            verify_page=lambda ns: None,
+            success_check=lambda ns: ns is candidate_list,
+        )
+        session.press_label.assert_awaited_once_with("不合适")
+        self.assertEqual([call.args for call in session.driver.perform.await_args_list],
+                         [(REASON, "press"), (CONFIRM_BUTTON, "press")])
+        for call, page in zip(session.wait.await_args_list, [panel, confirm_page, candidate_list]):
+            self.assertTrue(call.args[0](page))
+
+    def test_platform_reason_mapping_uses_visible_presets(self):
+        cases = [
+            ("薪资不符", "期望薪资偏高"),
+            ("学历不符", "不考虑 中专/中技"),
+            ("年龄不符", "年龄不合适"),
+            ("期望不符", "期望薪资偏高"),
+            ("距离太远", "牛人距离远"),
+            ("过往经历不符", "工作经历和市场推广/地推无关"),
+            ("其他原因", "其他原因"),
+            ("简历不真实", "其他原因"),
+            ("已找到工作", "其他原因"),
+        ]
+        for category, expected in cases:
+            with self.subTest(category=category):
+                self.assertEqual(platform_reason_label(REAL_PANEL, category), expected)
+        without_other = [n for n in REAL_PANEL if n.description != "其他原因"]
+        with self.assertRaisesRegex(NativeDriverError, "未提供匹配"):
+            platform_reason_label(without_other, "简历不真实")
+        polluted = REAL_PANEL + [node("工作经历", "AXStaticText"), node("教育经历", "AXStaticText")]
+        self.assertEqual(platform_reason_label(polluted, "过往经历不符"),
+                         "工作经历和市场推广/地推无关")
+
+    async def test_detail_menu_opens_unsuitable_from_rightmost_toolbar(self):
+        window = AXNode((), "AXWindow", "", "BOSS直聘", "",
+                        {"x": 21, "y": 445, "width": 788, "height": 1083}, ("AXRaise",))
+        first = node("", path=(0, 1, 0, 1))
+        second = node("", path=(0, 1, 0, 2))
+        more = replace(node("", path=(0, 1, 0, 3)),
+                       rect={"x": 769, "y": 492, "width": 31, "height": 34})
+        menu_item = node("不合适", path=(0, 1, 2))
+        session = SimpleNamespace(
+            snapshot=AsyncMock(return_value=[window, first, second, more, node("求职期望")]),
+            driver=SimpleNamespace(perform=AsyncMock()),
+            wait=AsyncMock(return_value=[window, menu_item, node("举报")]),
+        )
+        await open_detail_unsuitable_panel(session)
+        self.assertEqual([call.args for call in session.driver.perform.await_args_list],
+                         [(more, "press"), (menu_item, "press")])
+
+    async def test_mark_real_platform_reason_accepts_auto_submit_to_list(self):
+        candidate_list = [node("牛人", "AXStaticText"), node("推荐", "AXStaticText")]
+        session = SimpleNamespace(
+            snapshot=AsyncMock(return_value=[node("求职期望"), node("工作经历")]),
+            driver=SimpleNamespace(perform=AsyncMock()), press_label=AsyncMock(),
+            wait=AsyncMock(side_effect=[REAL_PANEL, candidate_list]),
+        )
+        opener = AsyncMock()
+        await mark_unsuitable(
+            session, "过往经历不符",
+            verify_page=lambda ns: None,
+            success_check=lambda ns: ns is candidate_list,
+            open_panel=opener,
+            map_reason=lambda ns: platform_reason_label(ns, "过往经历不符"),
+        )
+        opener.assert_awaited_once_with(session)
+        chosen = next(n for n in REAL_PANEL if n.description == "工作经历和市场推广/地推无关")
+        self.assertEqual([call.args for call in session.driver.perform.await_args_list],
+                         [(chosen, "press")])
+
+    async def test_mark_with_advance_check_accepts_next_resume_after_reason(self):
+        panel = REAL_PANEL
+        initial = [node("求职期望", "AXStaticText"), node("工作经历", "AXStaticText")]
+        next_resume = [node("求职期望", "AXStaticText"), node("工作经历", "AXStaticText")]
+        session = SimpleNamespace(
+            snapshot=AsyncMock(return_value=initial),
+            driver=SimpleNamespace(perform=AsyncMock()), press_label=AsyncMock(),
+            wait=AsyncMock(side_effect=[panel, next_resume]),
+        )
+
+        def verify(ns):
+            if ns is panel or ns is initial:
+                return
+            raise NativeDriverError("候选人发生变化")
+
+        await mark_unsuitable(
+            session, "过往经历不符",
+            verify_page=verify,
+            success_check=lambda ns: False,
+            open_panel=AsyncMock(),
+            map_reason=lambda ns: platform_reason_label(ns, "过往经历不符"),
+            advance_check=lambda ns: ns is next_resume,
+        )
+        chosen = next(n for n in REAL_PANEL if n.description == "工作经历和市场推广/地推无关")
+        self.assertEqual([call.args for call in session.driver.perform.await_args_list],
+                         [(chosen, "press")])
+
+    async def test_mark_other_reason_enters_custom_text_and_confirms(self):
+        initial = [node("求职期望", "AXStaticText", path=(0,)),
+                   node("工作经历", "AXStaticText", path=(1,))]
+        field = AXNode((0, 1, 0, 2), "AXTextArea", "", "", "",
+                       {"x": 0, "y": 0, "width": 100, "height": 30}, ("AXPress",))
+        dialog = [node("输入原因", "AXStaticText", path=(0, 1, 0, 0)),
+                  node("请输入", "AXStaticText", path=(0, 1, 0, 1)),
+                  field,
+                  node("取消", path=(0, 1, 0, 6)),
+                  node("确定", path=(0, 1, 0, 7))]
+        filled = [replace(n, value="其他原因") if n is field else n for n in dialog]
+        candidate_list = [node("牛人", "AXStaticText", path=(0,)),
+                          node("推荐", "AXStaticText", path=(1,))]
+        session = SimpleNamespace(
+            snapshot=AsyncMock(return_value=initial),
+            driver=SimpleNamespace(perform=AsyncMock(), set_value=AsyncMock()),
+            press_label=AsyncMock(),
+            wait=AsyncMock(side_effect=[REAL_PANEL, dialog, filled, candidate_list]),
+        )
+        await mark_unsuitable(
+            session, "其他原因",
+            verify_page=lambda ns: None,
+            success_check=lambda ns: ns is candidate_list,
+            open_panel=AsyncMock(),
+        )
+        session.driver.set_value.assert_awaited_once_with(field, "其他原因")
+        reason_node = next(n for n in REAL_PANEL if n.description == "其他原因")
+        confirm_node = next(n for n in filled if n.description == "确定")
+        self.assertEqual([call.args for call in session.driver.perform.await_args_list],
+                         [(reason_node, "press"), (confirm_node, "press")])
+
     async def test_mark_unconfirmed_submission_stops_without_retry(self):
         async def wait(predicate, description):
             if "原因选择" in description:
@@ -157,11 +306,12 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.driver.perform.await_count, 2)
 
     async def test_enabled_unqualified_flow_counts_only_confirmed_mark(self):
-        for error in (None, TimeoutError("not confirmed")):
-            with self.subTest(error=error):
+        for error, landed_on_list in ((None, False), (None, True), (TimeoutError("not confirmed"), False)):
+            with self.subTest(error=error, landed_on_list=landed_on_list):
+                post_mark = EMPTY if landed_on_list else CHAT
                 session = SimpleNamespace(
                     driver=SimpleNamespace(perform=AsyncMock()),
-                    snapshot=AsyncMock(side_effect=[LIST, RESUME, RESUME]),
+                    snapshot=AsyncMock(side_effect=[LIST, RESUME, RESUME, post_mark]),
                     press_label=AsyncMock(), wait=AsyncMock(side_effect=[LIST, LIST, CHAT]),
                     read_resume=AsyncMock(return_value="郑女士\n主播经验"),
                     back=AsyncMock(side_effect=[CHAT, EMPTY]),
@@ -171,23 +321,25 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
                 with patch("native_greetings.llm_utils.is_qualified_text_result", return_value=result), \
                      patch("native_greetings.mark_unsuitable", AsyncMock(side_effect=error)) as mark:
                     if error is None:
-                        self.assertEqual(await loop_greetings(session, CONFIGS, None, stats, allow_contact=True,
-                                                              rejection_reviewer=AsyncMock(return_value=True)), 1)
+                        self.assertEqual(await loop_greetings(session, CONFIGS, None, stats, allow_contact=True), 1)
                     else:
                         with self.assertRaises(TimeoutError):
-                            await loop_greetings(session, CONFIGS, None, stats, allow_contact=True,
-                                                 rejection_reviewer=AsyncMock(return_value=True))
-                mark.assert_awaited_once_with(session, "过往经历不符", CARD.description)
+                            await loop_greetings(session, CONFIGS, None, stats, allow_contact=True)
+                mark.assert_awaited_once()
+                self.assertEqual(mark.await_args.args, (session, "过往经历不符"))
+                self.assertEqual(set(mark.await_args.kwargs), {"verify_page", "success_check"})
                 self.assertEqual(stats["私域电商主播"].get("marked_unsuitable", 0), 1 if error is None else 0)
-                self.assertEqual(session.back.await_count, 2 if error is None else 1)
+                self.assertEqual(session.back.await_count, 1 if error is not None or landed_on_list else 2)
 
-    async def test_each_unqualified_candidate_needs_explicit_human_review(self):
-        for decision in (None, False, True, "yes"):
+    async def test_unqualified_default_marks_and_review_decision_can_queue(self):
+        for decision, marks in ((None, True), (True, True), (False, False), ("yes", False)):
             with self.subTest(decision=decision):
                 reviewer = None if decision is None else AsyncMock(return_value=decision)
+                post_mark = EMPTY if marks else None
+                snapshot_pages = [LIST, RESUME, RESUME] + ([post_mark] if marks else [])
                 session = SimpleNamespace(
                     driver=SimpleNamespace(perform=AsyncMock()),
-                    snapshot=AsyncMock(side_effect=[LIST, RESUME, RESUME]),
+                    snapshot=AsyncMock(side_effect=snapshot_pages),
                     press_label=AsyncMock(), wait=AsyncMock(side_effect=[LIST, LIST, CHAT]),
                     read_resume=AsyncMock(return_value="郑女士\n主播经验"),
                     back=AsyncMock(side_effect=[CHAT, EMPTY]),
@@ -200,8 +352,9 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
                                                           rejection_reviewer=reviewer), 1)
                 if reviewer is not None:
                     reviewer.assert_awaited_once_with("私域电商主播", result)
-                if decision is True:
-                    mark.assert_awaited_once_with(session, "过往经历不符", CARD.description)
+                if marks:
+                    mark.assert_awaited_once()
+                    self.assertEqual(mark.await_args.args, (session, "过往经历不符"))
                     self.assertEqual(stats["私域电商主播"]["marked_unsuitable"], 1)
                     self.assertNotIn("awaiting_review", stats["私域电商主播"])
                 else:
@@ -311,6 +464,19 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(NativeDriverError, "return failed"):
             await loop_greetings(session, CONFIGS, None, {})
+
+    async def test_resume_network_banner_returns_to_list_without_processing(self):
+        session = SimpleNamespace(
+            driver=SimpleNamespace(perform=AsyncMock()), snapshot=AsyncMock(return_value=LIST),
+            press_label=AsyncMock(), wait=AsyncMock(side_effect=[LIST, LIST, CHAT]),
+            read_resume=AsyncMock(side_effect=NativeNetworkError("BOSS 网络连接失败")),
+            back=AsyncMock(side_effect=[CHAT, EMPTY]),
+        )
+        self.assertEqual(await loop_greetings(session, CONFIGS, None, {}), 0)
+        session.read_resume.assert_awaited_once()
+        self.assertEqual(session.back.await_count, 2)
+        for call in session.back.await_args_list:
+            self.assertTrue(call.kwargs["allow_network_error"])
 
     async def test_send_does_not_overwrite_existing_draft(self):
         session = SimpleNamespace(snapshot=AsyncMock(return_value=CHAT + [node("", "AXTextArea", "草稿", path=(0, 9, 0))]),

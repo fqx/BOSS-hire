@@ -203,6 +203,11 @@ RETRY_DELAYS = [10, 30]  # seconds to wait before 1st and 2nd retry
 
 _base_url = os.getenv("OPENAI_BASE_URL", "")
 _local_hosts = ("localhost", "127.0.0.1", "::1")
+
+
+def is_local_base_url(base_url):
+    """Local model endpoints must not inherit a system HTTP proxy."""
+    return bool(base_url) and any(host in base_url for host in _local_hosts)
 _is_openai_cloud = (
     not any(h in _base_url for h in _local_hosts)
     and LLM_MODEL.lower().startswith("gpt")
