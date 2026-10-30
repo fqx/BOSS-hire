@@ -380,42 +380,164 @@ async def _resume_frame_value(tab, context_id, expression):
     return result.value
 
 
-async def _read_resume_screenshot(tab, frame_id) -> str | None:
-    """Capture visible canvas strips and stitch a full PNG without reading canvas pixels.
+# Geometry is measured in each document's CSS viewport. Frame content rectangles
+# map child coordinates into the parent, including fractional iframe dimensions.
+_RESUME_NODE_GEOMETRY = """function(fraction, scroll) {
+    const target = this;
+    function contentRect() {
+        const r = target.getBoundingClientRect(), s = getComputedStyle(target);
+        const l = parseFloat(s.borderLeftWidth) + parseFloat(s.paddingLeft);
+        const t = parseFloat(s.borderTopWidth) + parseFloat(s.paddingTop);
+        const right = parseFloat(s.borderRightWidth) + parseFloat(s.paddingRight);
+        const bottom = parseFloat(s.borderBottomWidth) + parseFloat(s.paddingBottom);
+        return {left:r.left+l, top:r.top+t, width:r.width-l-right, height:r.height-t-bottom};
+    }
+    if (scroll) {
+        for (let e=target.parentElement; e; e=e.parentElement) {
+            const style=getComputedStyle(e), p=e.getBoundingClientRect();
+            if (/auto|scroll|hidden/.test(style.overflowY) && e.scrollHeight>e.clientHeight) {
+                const c=contentRect();
+                e.scrollTo({top:e.scrollTop+c.top+fraction*c.height-p.top-e.clientTop, behavior:'instant'});
+            }
+        }
+        const c=contentRect();
+        window.scrollTo({top:scrollY+c.top+fraction*c.height, behavior:'instant'});
+    }
+    const c=contentRect();
+    let left=0, top=0, right=innerWidth, bottom=innerHeight;
+    for (let e=target.parentElement; e; e=e.parentElement) {
+        const r=e.getBoundingClientRect(), style=getComputedStyle(e);
+        if (/auto|scroll|hidden|clip/.test(style.overflowY)) {
+            top=Math.max(top,r.top+e.clientTop);
+            bottom=Math.min(bottom,r.top+e.clientTop+e.clientHeight);
+        }
+        if (/auto|scroll|hidden|clip/.test(style.overflowX)) {
+            left=Math.max(left,r.left+e.clientLeft);
+            right=Math.min(right,r.left+e.clientLeft+e.clientWidth);
+        }
+    }
+    return {content:c, visible:{left,top,right,bottom},
+            viewport:{width:innerWidth,height:innerHeight,x:scrollX,y:scrollY},
+            point:c.top+fraction*c.height};
+}"""
 
-    Scroll positions are restored even on cancellation. No script elements are inserted; image prototypes, CORS headers and canvas
-    contents are left intact.
-    """
-    context = await tab.send(cdp.page.create_isolated_world(
-        frame_id=frame_id, world_name='resume_screenshot',
-    ))
-    size = await _resume_frame_value(tab, context, """
-        (() => {
-            const c = document.querySelector('canvas#resume');
-            if (!c || !c.width || !c.height || document.readyState !== 'complete') return null;
-            if (Array.from(document.images).some(i => !i.complete || !i.naturalWidth)) return null;
-            const r = c.getBoundingClientRect();
-            if (!r.width || !r.height) return null;
-            return {width: r.width, height: r.height};
-        })()
-    """)
-    if size is None:
-        return None
-    canvas, error = await tab.send(cdp.runtime.evaluate(
-        expression="document.querySelector('canvas#resume')", context_id=context,
+
+async def _resume_node_value(tab, node, function, *args):
+    result, error = await tab.send(cdp.runtime.call_function_on(
+        function_declaration=function, object_id=node,
+        arguments=[cdp.runtime.CallArgument(value=arg) for arg in args],
+        return_by_value=True,
     ))
     if error:
-        raise ResumeCaptureError(error.text)
-    await _resume_frame_value(tab, context, """
-        (() => {
-            const positions = [];
-            for (let e = document.querySelector('canvas#resume').parentElement; e; e = e.parentElement)
-                positions.push([e, e.scrollLeft, e.scrollTop]);
-            globalThis.resumeScrollPositions = positions;
-            globalThis.resumeWindowScroll = [scrollX, scrollY];
-            return true;
-        })()
-    """)
+        raise ResumeCaptureError(f"Resume geometry failed: {error.text}")
+    return result.value
+
+
+async def _capture_resume_strips(tab, nodes):
+    """One full pass, mapping all clipping ancestors across the frame chain."""
+    canvas_node = await tab.send(cdp.dom.describe_node(object_id=nodes[-1]))
+    initial = await _resume_node_value(tab, nodes[-1], _RESUME_NODE_GEOMETRY, 0, False)
+    width, height = initial['content']['width'], initial['content']['height']
+    if width <= 0 or height <= 0:
+        return None
+    output = Image.new('RGB', (max(1, round(width)), max(1, round(height))))
+    offset = 0
+    while offset < output.height:
+        await raise_if_captcha(tab, 'while capturing resume')
+        fraction = max(0, offset / output.height - 1 / height)
+        for node in reversed(nodes):
+            geometry = await _resume_node_value(tab, node, _RESUME_NODE_GEOMETRY, fraction, True)
+            fraction = geometry['point'] / geometry['viewport']['height']
+        await asyncio.sleep(0.05)
+        geometries = [await _resume_node_value(tab, node, _RESUME_NODE_GEOMETRY, 0, False)
+                      for node in nodes]
+        origin_x = origin_y = 0.0
+        scale_x = scale_y = 1.0
+        left = top = -math.inf
+        right = bottom = math.inf
+        for index, geometry in enumerate(geometries):
+            visible, content = geometry['visible'], geometry['content']
+            left = max(left, origin_x + visible['left'] * scale_x)
+            top = max(top, origin_y + visible['top'] * scale_y)
+            right = min(right, origin_x + visible['right'] * scale_x)
+            bottom = min(bottom, origin_y + visible['bottom'] * scale_y)
+            origin_x += content['left'] * scale_x
+            origin_y += content['top'] * scale_y
+            if index < len(geometries) - 1:
+                child = geometries[index+1]['viewport']
+                scale_x *= content['width'] / child['width']
+                scale_y *= content['height'] / child['height']
+        canvas = geometries[-1]['content']
+        if abs(canvas['width']-width) > 0.001 or abs(canvas['height']-height) > 0.001:
+            return None  # Layout changed mid-pass; discard all strips and start again.
+        rendered_width, rendered_height = width * scale_x, height * scale_y
+        start = origin_y + offset / output.height * rendered_height
+        end = min(bottom, origin_y + rendered_height)
+        end_row = min(output.height, math.floor((end-origin_y)/rendered_height*output.height + 1e-6))
+        if (top > start + 0.01 or end_row <= offset or left > origin_x + 0.01
+                or right < origin_x + rendered_width - 0.01):
+            raise ResumeCaptureError('Resume is clipped or cannot be scrolled completely into view')
+        # Both the CSS clip and the output rows use the same normalized boundary.
+        end = origin_y + end_row / output.height * rendered_height
+        # CDP hit-testing follows stacking across frame boundaries and can include
+        # pointer-transparent overlays, unlike document.elementFromPoint().
+        root = geometries[0]['viewport']
+        dx, dy = min(1, rendered_width/4), min(1, (end-start)/4)
+        for x in (origin_x+dx, origin_x+rendered_width/2, origin_x+rendered_width-dx):
+            for y in (start+dy, (start+end)/2, end-dy):
+                hit, _, _ = await tab.send(cdp.dom.get_node_for_location(
+                    x=math.floor(min(x, root['width']-1)+root['x']),
+                    y=math.floor(min(y, root['height']-1)+root['y']),
+                    ignore_pointer_events_none=True,
+                ))
+                if hit == canvas_node.backend_node_id:
+                    continue
+                hit_node = await tab.send(cdp.dom.resolve_node(
+                    backend_node_id=hit, object_group='resume_screenshot',
+                ))
+                invisible = await _resume_node_value(tab, hit_node.object_id, """function() {
+                    if(getComputedStyle(this).visibility==='hidden') return true;
+                    for(let e=this;e;e=e.parentElement)
+                        if(Number(getComputedStyle(e).opacity)===0) return true;
+                    return false;
+                }""")
+                if not invisible:
+                    raise ResumeCaptureError('Resume capture area is covered by another element')
+        encoded = await tab.send(cdp.page.capture_screenshot(
+            format_='png', capture_beyond_viewport=False,
+            clip=cdp.page.Viewport(x=origin_x+root['x'], y=start+root['y'],
+                width=rendered_width, height=end-start, scale=1),
+        ))
+        with Image.open(io.BytesIO(base64.b64decode(encoded))) as strip:
+            output.paste(strip.resize((output.width, end_row-offset)), (0, offset))
+        offset = end_row
+    return output
+
+
+async def _resume_nodes_ready(tab, nodes):
+    """Browser loading state scoped to the canvas and its enclosing dialogs."""
+    for node in nodes:
+        if not await _resume_node_value(tab, node, """function() {
+            const doc=this.ownerDocument;
+            if(doc.readyState!=='complete' || doc.fonts.status!=='loaded') return false;
+            if(this.tagName==='CANVAS' && Array.from(doc.images)
+                .some(i=>!i.complete && i.loading!=='lazy')) return false;
+            for(let e=this;e;e=e.parentElement)
+                if(e.getAttribute('aria-busy')==='true') return false;
+            const scope=this.tagName==='CANVAS' ? doc : this.closest('.resume-common-dialog,[role="dialog"]');
+            return !scope || !Array.from(scope.querySelectorAll('[aria-busy="true"], [role="progressbar"], .resume-loading'))
+                .some(e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden');
+        }"""):
+            return False
+    return True
+
+
+async def _read_resume_screenshot(tab, frame_id) -> str | None:
+    """Wait for loading and stable complete captures; restore every frame's scroll.
+
+    Stability is a heuristic for asynchronous drawing, not a renderer completion
+    signal. No canvas pixels are read through JS and no page prototypes are changed.
+    """
     tree = await tab.send(cdp.page.get_frame_tree())
     def frame_path(node, parents):
         path = parents + [node.frame.id_]
@@ -429,92 +551,112 @@ async def _read_resume_screenshot(tab, frame_id) -> str | None:
     path = frame_path(tree, [])
     if path is None:
         raise ResumeCaptureError('Resume frame disappeared before capture')
-    owners = []
-    for fid in path[1:]:
-        owner, _ = await tab.send(cdp.dom.get_frame_owner(fid))
-        owners.append(owner)
-    output = Image.new('RGB', (math.ceil(size['width']), math.ceil(size['height'])))
-    offset = 0
+    contexts, nodes = [], []
+    pending = set()
+    recent_network = asyncio.get_running_loop().time()
+
+    async def request_started(event):
+        nonlocal recent_network
+        if event.frame_id in path and event.type_ not in (
+                cdp.network.ResourceType.WEB_SOCKET, cdp.network.ResourceType.EVENT_SOURCE):
+            pending.add(event.request_id)
+            recent_network = asyncio.get_running_loop().time()
+
+    async def request_finished(event):
+        nonlocal recent_network
+        if event.request_id in pending:
+            pending.discard(event.request_id)
+            recent_network = asyncio.get_running_loop().time()
+
+    handlers = [(cdp.network.RequestWillBeSent, request_started),
+                (cdp.network.LoadingFinished, request_finished),
+                (cdp.network.LoadingFailed, request_finished)]
+    for event, handler in handlers:
+        tab.add_handler(event, handler)
     try:
-        while offset < output.height:
-            await raise_if_captcha(tab, 'while capturing resume')
-            visible = await _resume_frame_value(tab, context, f"""
-                (() => {{
-                    const c = document.querySelector('canvas#resume');
-                    for (let e = c.parentElement; e; e = e.parentElement) {{
-                        if (e.scrollHeight > e.clientHeight && /auto|scroll|hidden/.test(getComputedStyle(e).overflowY)) {{
-                            const r = c.getBoundingClientRect(), p = e.getBoundingClientRect();
-                            e.scrollTop += r.top + {offset} - p.top - e.clientTop;
-                        }}
-                    }}
-                    window.scrollBy(0, c.getBoundingClientRect().top + {offset});
-                    const r = c.getBoundingClientRect();
-                    let top = 0, bottom = innerHeight, left = 0, right = innerWidth;
-                    for (let e = c.parentElement; e; e = e.parentElement) {{
-                        const p = e.getBoundingClientRect(), style = getComputedStyle(e);
-                        if (/auto|scroll|hidden|clip/.test(style.overflowY)) {{
-                            top = Math.max(top, p.top + e.clientTop);
-                            bottom = Math.min(bottom, p.top + e.clientTop + e.clientHeight);
-                        }}
-                        if (/auto|scroll|hidden|clip/.test(style.overflowX)) {{
-                            left = Math.max(left, p.left + e.clientLeft);
-                            right = Math.min(right, p.left + e.clientLeft + e.clientWidth);
-                        }}
-                    }}
-                    return {{top: Math.max(0, top-r.top), bottom: Math.min(r.height, bottom-r.top),
-                        left: Math.max(0, left-r.left), right: Math.min(r.width, right-r.left)}};
-                }})()
-            """)
-            # Let the compositor paint after scrolling before taking the screenshot.
-            await asyncio.sleep(0.05)
-            box = await tab.send(cdp.dom.get_box_model(object_id=canvas.object_id))
-            x, y = box.content[0], box.content[1]
-            metrics = await tab.send(cdp.page.get_layout_metrics())
-            viewport = metrics[3]  # CSS layout viewport (not device pixels)
-            top = max(offset, math.ceil(visible['top']), math.ceil(viewport.page_y - y))
-            bottom = min(output.height, math.floor(visible['bottom']),
-                         math.floor(viewport.page_y + viewport.client_height - y))
-            left = max(visible['left'], viewport.page_x - x)
-            right = min(visible['right'], viewport.page_x + viewport.client_width - x)
-            for owner in owners:
-                frame_box = await tab.send(cdp.dom.get_box_model(backend_node_id=owner))
-                q = frame_box.content
-                top = max(top, math.ceil(q[1] - y))
-                bottom = min(bottom, math.floor(q[5] - y))
-                left = max(left, q[0] - x)
-                right = min(right, q[2] - x)
-            if top > offset or bottom <= offset or left > 0.5 or right < size['width'] - 0.5:
-                raise ResumeCaptureError('Resume is clipped or cannot be scrolled completely into view')
-            encoded = await tab.send(cdp.page.capture_screenshot(
-                format_='png', capture_beyond_viewport=False,
-                clip=cdp.page.Viewport(x=x, y=y + offset, width=size['width'],
-                                       height=bottom-offset, scale=1),
+        await tab.send(cdp.network.enable())
+        for index, fid in enumerate(path):
+            context = await tab.send(cdp.page.create_isolated_world(
+                frame_id=fid, world_name='resume_screenshot',
             ))
-            with Image.open(io.BytesIO(base64.b64decode(encoded))) as strip:
-                output.paste(strip.resize((output.width, bottom-offset)), (0, offset))
-            offset = bottom
+            if index == len(path)-1:
+                node, error = await tab.send(cdp.runtime.evaluate(
+                    expression="document.querySelector('canvas#resume')", context_id=context,
+                    object_group='resume_screenshot',
+                ))
+                if error:
+                    raise ResumeCaptureError(error.text)
+                if node.subtype == 'null':
+                    return None
+            else:
+                owner, _ = await tab.send(cdp.dom.get_frame_owner(path[index+1]))
+                node = await tab.send(cdp.dom.resolve_node(
+                    backend_node_id=owner, execution_context_id=context,
+                    object_group='resume_screenshot',
+                ))
+            await _resume_node_value(tab, node.object_id, """function() {
+                const positions=[];
+                for(let e=this.parentElement;e;e=e.parentElement)
+                    positions.push([e,e.scrollLeft,e.scrollTop]);
+                globalThis.resumeCaptureState={positions,x:scrollX,y:scrollY};
+                return true;
+            }""")
+            contexts.append(context)
+            nodes.append(node.object_id)
+        previous = None
+        stable_since = None
+        while True:
+            await raise_if_captcha(tab, 'while waiting for resume rendering')
+            ready = await _resume_nodes_ready(tab, nodes)
+            now = asyncio.get_running_loop().time()
+            if not ready or pending or now-recent_network < 0.5:
+                previous = stable_since = None
+                await asyncio.sleep(0.2)
+                continue
+            network_before = recent_network
+            image = await _capture_resume_strips(tab, nodes)
+            ready_after = await _resume_nodes_ready(tab, nodes)
+            if image is None or not ready_after or pending or network_before != recent_network:
+                previous = stable_since = None
+                await asyncio.sleep(0.2)
+                continue
+            if all(low == high for low, high in image.getextrema()):
+                return None
+            pixels = (image.size, image.tobytes())
+            now = asyncio.get_running_loop().time()
+            if pixels != previous:
+                previous, stable_since = pixels, now
+            elif now-stable_since >= 2.0:
+                buffer = io.BytesIO()
+                image.save(buffer, format='PNG')
+                return base64.b64encode(buffer.getvalue()).decode()
+            await asyncio.sleep(0.25)
     finally:
         active_error = sys.exception()
+        cleanup_error = None
+        for context in reversed(contexts):
+            try:
+                await _resume_frame_value(tab, context, """
+                    (() => {
+                        const state=globalThis.resumeCaptureState;
+                        for(const [e,x,y] of state.positions) e.scrollTo({left:x,top:y,behavior:'instant'});
+                        window.scrollTo({left:state.x,top:state.y,behavior:'instant'});
+                        delete globalThis.resumeCaptureState;
+                        return true;
+                    })()
+                """)
+            except Exception as error:
+                cleanup_error = error
+                logger.warning('恢复简历截图滚动位置失败', exc_info=True)
+        for event, handler in handlers:
+            tab.remove_handlers(event, handler)
         try:
-            await _resume_frame_value(tab, context, """
-                (() => {
-                    for (const [e, x, y] of globalThis.resumeScrollPositions) e.scrollTo(x, y);
-                    window.scrollTo(...globalThis.resumeWindowScroll);
-                    delete globalThis.resumeScrollPositions;
-                    delete globalThis.resumeWindowScroll;
-                    return true;
-                })()
-            """)
-            await tab.send(cdp.runtime.release_object(canvas.object_id))
-        except Exception:
-            if active_error is None:
-                raise
-            logger.warning("恢复简历截图状态失败，保留原始异常", exc_info=True)
-    if all(low == high for low, high in output.getextrema()):
-        return None  # The canvas has dimensions but has not painted its content yet.
-    buffer = io.BytesIO()
-    output.save(buffer, format='PNG')
-    return base64.b64encode(buffer.getvalue()).decode()
+            await tab.send(cdp.runtime.release_object_group('resume_screenshot'))
+        except Exception as error:
+            cleanup_error = error
+            logger.warning('释放简历截图对象失败', exc_info=True)
+        if active_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 async def get_resume(tab, idx) -> tuple[str | None, str]:
@@ -601,12 +743,44 @@ async def say_hi(tab):
     await dismiss_hover_panels(tab)
 
 
+async def _resume_is_open(tab, greeting):
+    body = """
+        return Array.from(doc.querySelectorAll(SELECTORS)).some(e => {
+            const r=e.getBoundingClientRect();
+            return r.width>0 && r.height>0 && getComputedStyle(e).visibility!=='hidden';
+        });
+    """
+    if greeting:
+        return await tab.evaluate("(() => {const doc=document;" + body.replace(
+            'SELECTORS', repr('.resume-common-dialog')) + "})()")
+    result = await _in_frame(tab, body.replace(
+        'SELECTORS', repr('.close-btn, iframe[src*="c-resume"]')))
+    if result is None:
+        await raise_if_captcha(tab, 'while checking resume closure')
+        raise ResumeCaptureError('Recommendation frame disappeared while closing resume')
+    return result
+
+
+async def _close_resume_dialog(tab, greeting):
+    await raise_if_captcha(tab, 'before closing resume')
+    if not await _resume_is_open(tab, greeting):
+        return
+    if greeting:
+        clicked = await _mouse_click_css(tab, '.resume-common-dialog .close-btn')
+    else:
+        clicked = await _frame_mouse_click_css(tab, css_resume_close)
+    if not clicked:
+        raise ResumeCaptureError('Resume close button could not be clicked')
+    for _ in range(20):
+        await raise_if_captcha(tab, 'while closing resume')
+        if not await _resume_is_open(tab, greeting):
+            return
+        await asyncio.sleep(0.3)
+    raise ResumeCaptureError('Resume dialog remained open after closing')
+
+
 async def close_resume(tab):
-    await asyncio.sleep(jitter(1))
-    await _frame_mouse_click_css(tab, css_resume_close)
-    # Move mouse away from the top-right area: the close button (.close-btn) lands
-    # near the avatar dropdown trigger zone; without this the dropdown can stay
-    # open and catch the next click.
+    await _close_resume_dialog(tab, greeting=False)
     await dismiss_hover_panels(tab)
 
 
@@ -851,21 +1025,8 @@ async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
 
 
 async def close_online_resume_greeting(tab):
-    """Close the online resume modal (.resume-common-dialog) via its main-page .close-btn."""
-    await asyncio.sleep(jitter(2))
-    await _mouse_click_css(tab, '.resume-common-dialog .close-btn')
-    # Wait until modal is fully gone before returning.
-    for _ in range(20):
-        still_open = await tab.evaluate("""
-            (function() {
-                var el = document.querySelector('.resume-common-dialog .close-btn');
-                return el !== null && el.offsetParent !== null;
-            })()
-        """)
-        if not still_open:
-            break
-        await asyncio.sleep(0.3)
-    await asyncio.sleep(0.3)  # brief buffer after modal disappears
+    """Return only after the online resume modal has closed."""
+    await _close_resume_dialog(tab, greeting=True)
 
 
 GREETING_QUALIFIED_MSG = "您好，感谢您的主动联系！您的背景很符合我们的要求，麻烦发一份简历给我看看~"

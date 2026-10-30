@@ -91,6 +91,87 @@ class WorkflowErrorTests(unittest.IsolatedAsyncioTestCase):
                 close.assert_awaited_once()
 
 
+class ResumeCloseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_greeting_close_failure_stops(self):
+        tab = SimpleNamespace(evaluate=AsyncMock(return_value=True))
+        with patch.object(driver_utils.asyncio, 'sleep', new=AsyncMock()), \
+             patch.object(driver_utils, 'raise_if_captcha', new=AsyncMock()), \
+             patch.object(driver_utils, '_mouse_click_css', new=AsyncMock(return_value=False)), \
+             self.assertRaises(driver_utils.ResumeCaptureError):
+            await driver_utils.close_online_resume_greeting(tab)
+
+    async def test_recommendation_close_failure_stops(self):
+        with patch.object(driver_utils.asyncio, 'sleep', new=AsyncMock()), \
+             patch.object(driver_utils, 'raise_if_captcha', new=AsyncMock()), \
+             patch.object(driver_utils, '_frame_mouse_click_css', new=AsyncMock(return_value=False)), \
+             self.assertRaises(driver_utils.ResumeCaptureError):
+            await driver_utils.close_resume(SimpleNamespace(evaluate=AsyncMock(return_value=True), send=AsyncMock()))
+
+    async def test_close_waits_until_dialog_disappears(self):
+        for greeting in (False, True):
+            with self.subTest(greeting=greeting), \
+                 patch.object(driver_utils, 'raise_if_captcha', new=AsyncMock()), \
+                 patch.object(driver_utils, '_resume_is_open', new=AsyncMock(side_effect=[True, True, False])) as is_open, \
+                 patch.object(driver_utils, '_mouse_click_css', new=AsyncMock(return_value=True)) as main_click, \
+                 patch.object(driver_utils, '_frame_mouse_click_css', new=AsyncMock(return_value=True)) as frame_click, \
+                 patch.object(driver_utils.asyncio, 'sleep', new=AsyncMock()) as sleep:
+                await driver_utils._close_resume_dialog(None, greeting=greeting)
+                (main_click if greeting else frame_click).assert_awaited_once()
+                self.assertEqual(is_open.await_count, 3)
+                sleep.assert_awaited_once()
+
+    async def test_successful_click_with_persistent_dialog_stops(self):
+        for greeting in (False, True):
+            with self.subTest(greeting=greeting), \
+                 patch.object(driver_utils, 'raise_if_captcha', new=AsyncMock()), \
+                 patch.object(driver_utils, '_resume_is_open', new=AsyncMock(return_value=True)) as is_open, \
+                 patch.object(driver_utils, '_mouse_click_css', new=AsyncMock(return_value=True)), \
+                 patch.object(driver_utils, '_frame_mouse_click_css', new=AsyncMock(return_value=True)), \
+                 patch.object(driver_utils.asyncio, 'sleep', new=AsyncMock()), \
+                 self.assertRaisesRegex(driver_utils.ResumeCaptureError, 'remained open'):
+                await driver_utils._close_resume_dialog(None, greeting=greeting)
+            self.assertGreater(is_open.await_count, 1)
+
+    async def test_absent_dialog_is_safe_noop(self):
+        for greeting in (False, True):
+            with self.subTest(greeting=greeting), \
+                 patch.object(driver_utils, 'raise_if_captcha', new=AsyncMock()), \
+                 patch.object(driver_utils, '_resume_is_open', new=AsyncMock(return_value=False)), \
+                 patch.object(driver_utils, '_mouse_click_css', new=AsyncMock()) as main_click, \
+                 patch.object(driver_utils, '_frame_mouse_click_css', new=AsyncMock()) as frame_click:
+                await driver_utils._close_resume_dialog(None, greeting=greeting)
+                main_click.assert_not_awaited()
+                frame_click.assert_not_awaited()
+
+    async def test_greeting_timeout_close_failure_stops_before_next_candidate(self):
+        unread = AsyncMock(side_effect=[True, AssertionError('advanced to next candidate')])
+        with patch.object(driver_utils, 'raise_if_captcha', new=AsyncMock()), \
+             patch.object(driver_utils, 'is_greeting_unread', new=unread), \
+             patch.object(driver_utils, 'get_greeting_job_title_at', new=AsyncMock(return_value='test')), \
+             patch.object(driver_utils, 'open_greeting_at', new=AsyncMock()), \
+             patch.object(driver_utils, 'get_current_chat_job_title', new=AsyncMock(return_value='test')), \
+             patch.object(driver_utils, 'open_online_resume_greeting', new=AsyncMock()), \
+             patch.object(driver_utils, 'get_online_resume_greeting', new=AsyncMock(side_effect=TimeoutError('slow'))), \
+             patch.object(driver_utils, 'close_online_resume_greeting', new=AsyncMock(side_effect=driver_utils.ResumeCaptureError('close failed'))), \
+             self.assertRaisesRegex(driver_utils.ResumeCaptureError, 'close failed'):
+            await job_utils.loop_greetings(None, [{'job_title': 'test'}], None, {})
+        unread.assert_awaited_once()
+
+    async def test_recommendation_timeout_close_failure_stops_before_next_candidate(self):
+        viewed = AsyncMock(side_effect=[False, AssertionError('advanced to next candidate')])
+        with patch.object(driver_utils, 'raise_if_captcha', new=AsyncMock()), \
+             patch.object(driver_utils, 'is_viewed', new=viewed), \
+             patch.object(driver_utils, 'get_age', new=AsyncMock(return_value=28)), \
+             patch.object(driver_utils, 'get_resume_card_text', new=AsyncMock(return_value='28岁 5-7K 本科')), \
+             patch.object(driver_utils, 'get_resume', new=AsyncMock(side_effect=TimeoutError('slow'))), \
+             patch.object(driver_utils, 'close_resume', new=AsyncMock(side_effect=driver_utils.ResumeCaptureError('close failed'))), \
+             patch.object(driver_utils, 'scroll_down', new=AsyncMock()) as scroll, \
+             self.assertRaisesRegex(driver_utils.ResumeCaptureError, 'close failed'):
+            await job_utils.loop_recommend(None, 2, job_utils.get_job_requirements({}), None, {}, 'test')
+        viewed.assert_awaited_once()
+        scroll.assert_not_awaited()
+
+
 class ClickBoundsTests(unittest.IsolatedAsyncioTestCase):
     async def test_click_randomization_stays_in_central_region(self):
         tab = SimpleNamespace(evaluate=AsyncMock(return_value='{"x":100,"y":200,"width":80,"height":20}'),
