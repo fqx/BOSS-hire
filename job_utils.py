@@ -243,8 +243,8 @@ async def save_age_rejection_diagnostic(tab, job_title, idx, age, keywords):
     """Capture an age-stage record when diagnostics are enabled and the card is readable."""
     if not resume_diagnostics_enabled():
         return
+    resume_text = await driver_utils.get_resume_card_text(tab, idx)
     try:
-        resume_text = await driver_utils.get_resume_card_text(tab, idx)
         if not resume_text:
             save_resume_diagnostic(
                 job_title, idx, {"age": age}, [], False, "parse_error", ""
@@ -262,7 +262,7 @@ async def save_age_rejection_diagnostic(tab, job_title, idx, age, keywords):
             "age",
             resume_text,
         )
-    except Exception as error:
+    except ValueError as error:
         logger.warning("#%s 年龄淘汰诊断解析失败：%s", idx, error)
         save_resume_diagnostic(
             job_title, idx, {"age": age}, [], False, "parse_error", ""
@@ -327,8 +327,10 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict, total:
                         driver_utils.get_online_resume_greeting(tab),
                         timeout=driver_utils.GREETING_RESUME_LOAD_TIMEOUT,
                     )
-                except (TimeoutError, Exception) as e:
-                    logger.warning(f"在线简历加载失败，跳过：{e}")
+                except TimeoutError as e:
+                    await driver_utils.raise_if_captcha(tab, 'after greeting resume timeout')
+                    logger.warning(f"在线简历加载超时，跳过：{e}")
+                    await driver_utils.close_online_resume_greeting(tab)
                     idx += 1
                     pbar.update(1)
                     continue
@@ -344,30 +346,23 @@ async def loop_greetings(tab, job_configs: list, client, job_stats: dict, total:
                     pbar.update(1)
                     continue
 
-                try:
-                    if result.is_qualified:
-                        logger.info(f"符合，发送招呼消息：{matched}")
-                        await driver_utils.request_resume(tab)
-                        # already_navigated intentionally NOT set here: request_resume (send message)
-                        # does not trigger platform auto-navigation. Setting it True would cause an
-                        # infinite loop if the platform stays on the same candidate (re-process same
-                        # person indefinitely). Worst case without the flag: one candidate skipped
-                        # if the platform ever does auto-navigate after a send — an acceptable loss.
-                        job_stats.setdefault(matched, {})['requested'] = job_stats.get(matched, {}).get('requested', 0) + 1
-                    else:
-                        reason = result.reason_category or '其他原因'
-                        logger.info(f"不符合（{reason}），标记不合适：{matched}")
-                        await driver_utils.mark_unsuitable(tab, reason)
-                        # mark_unsuitable removes the candidate from the list and the platform
-                        # auto-opens the next candidate, clearing their unread badge. Skip the
-                        # unread check on the next iteration to avoid skipping that candidate.
-                        already_navigated = True
-                except Exception as e:
-                    logger.warning(f"执行操作失败，跳过：{e}")
-                    idx += 1
-                    pbar.update(1)
-                    continue
-
+                if result.is_qualified:
+                    logger.info(f"符合，发送招呼消息：{matched}")
+                    await driver_utils.request_resume(tab)
+                    # already_navigated intentionally NOT set here: request_resume (send message)
+                    # does not trigger platform auto-navigation. Setting it True would cause an
+                    # infinite loop if the platform stays on the same candidate (re-process same
+                    # person indefinitely). Worst case without the flag: one candidate skipped
+                    # if the platform ever does auto-navigate after a send — an acceptable loss.
+                    job_stats.setdefault(matched, {})['requested'] = job_stats.get(matched, {}).get('requested', 0) + 1
+                else:
+                    reason = result.reason_category or '其他原因'
+                    logger.info(f"不符合（{reason}），标记不合适：{matched}")
+                    await driver_utils.mark_unsuitable(tab, reason)
+                    # mark_unsuitable removes the candidate from the list and the platform
+                    # auto-opens the next candidate, clearing their unread badge. Skip the
+                    # unread check on the next iteration to avoid skipping that candidate.
+                    already_navigated = True
                 processed += 1
                 pbar.update(1)
                 # After action, this item leaves 新招呼; idx stays (next candidate fills slot)
@@ -402,142 +397,149 @@ async def loop_recommend(tab, max_idx, job_requirements, client, job_stats, job_
         # 将当前进度条实例传递给日志处理器
         log_handler.set_tqdm(pbar)
 
-        while idx < max_idx:
-            try:
-                await driver_utils.raise_if_captcha(tab, "during recommendation scan")
-                idx += 1
-                if await driver_utils.is_viewed(tab, idx):
-                    logger.info(f"#{idx} 已经查看过。")
-                    await driver_utils.scroll_down(tab)
-                    pbar.update(1)
-                    continue
-
-                age = await driver_utils.get_age(tab, idx)
-                if job_requirements['age_lower_bound'] <= age <= job_requirements['age_upper_bound']:
-                    resume_text = await driver_utils.get_resume_card_text(tab, idx)
-
-                    try:
-                        if not resume_text:
-                            raise ValueError("empty resume card text")
-                        resume_dict = parse_resume(resume_text)
-                    except Exception as error:
-                        logger.warning(f"#{idx} 简历卡片解析失败：{error}")
-                        save_resume_diagnostic(
-                            job_title, idx, {"age": age}, [], False,
-                            "parse_error", resume_text or "",
-                        )
+        try:
+            while idx < max_idx:
+                try:
+                    await driver_utils.raise_if_captcha(tab, "during recommendation scan")
+                    idx += 1
+                    if await driver_utils.is_viewed(tab, idx):
+                        logger.info(f"#{idx} 已经查看过。")
                         await driver_utils.scroll_down(tab)
                         pbar.update(1)
                         continue
-                    if resume_dict['age'] is None:
-                        resume_dict['age'] = age
-                    matched_keywords = get_matched_keywords(
-                        job_requirements['cv_required_keywords'], resume_text
-                    )
-                    if job_requirements['gender'] is None or job_requirements['gender'] == resume_dict['gender']:
-                        # gender ok
-                        if job_requirements['maximum_salary'] <= 0 or (resume_dict['salary_lower_bound'] is not None and job_requirements['maximum_salary'] > resume_dict['salary_lower_bound'] > 0):
-                            # salary ok
-                            if resume_dict['education'] >= job_requirements['education']: # education ok
-                                if job_requirements['off_the_job'] <= 0 or resume_dict['job_status'] == '离职-随时到岗': # off_the_job ok:
 
-                                    if matches_keyword_tree(job_requirements['cv_required_keywords'], resume_text):
-                                        save_resume_diagnostic(
-                                            job_title, idx, resume_dict, matched_keywords, True,
-                                            "passed", resume_text,
-                                        )
-                                        logger.info("#{} 简历符合要求。调用LLM进一步处理。".format(idx))
+                    age = await driver_utils.get_age(tab, idx)
+                    if job_requirements['age_lower_bound'] <= age <= job_requirements['age_upper_bound']:
+                        resume_text = await driver_utils.get_resume_card_text(tab, idx)
 
-                                        resume_image_base64, overview_text = await asyncio.wait_for(
-                                            driver_utils.get_resume(tab, idx),
-                                            timeout=driver_utils.RESUME_LOAD_TIMEOUT,
-                                        )
-                                        is_qualified = llm_utils.is_qualified(client, resume_image_base64, job_requirements['cv_requirements'], overview_text)
-                                        viewed += 1
-                                        update_job_stats(job_title, viewed, greeted)
+                        try:
+                            if not resume_text:
+                                raise ValueError("empty resume card text")
+                            resume_dict = parse_resume(resume_text)
+                        except ValueError as error:
+                            logger.warning(f"#{idx} 简历卡片解析失败：{error}")
+                            save_resume_diagnostic(
+                                job_title, idx, {"age": age}, [], False,
+                                "parse_error", resume_text or "",
+                            )
+                            await driver_utils.scroll_down(tab)
+                            pbar.update(1)
+                            continue
+                        if resume_dict['age'] is None:
+                            resume_dict['age'] = age
+                        matched_keywords = get_matched_keywords(
+                            job_requirements['cv_required_keywords'], resume_text
+                        )
+                        if job_requirements['gender'] is None or job_requirements['gender'] == resume_dict['gender']:
+                            # gender ok
+                            if job_requirements['maximum_salary'] <= 0 or (resume_dict['salary_lower_bound'] is not None and job_requirements['maximum_salary'] > resume_dict['salary_lower_bound'] > 0):
+                                # salary ok
+                                if resume_dict['education'] >= job_requirements['education']: # education ok
+                                    if job_requirements['off_the_job'] <= 0 or resume_dict['job_status'] == '离职-随时到岗': # off_the_job ok:
 
-                                        if is_qualified:
-                                            logger.info(f"#{idx} 符合要求，打招呼。")
+                                        if matches_keyword_tree(job_requirements['cv_required_keywords'], resume_text):
+                                            save_resume_diagnostic(
+                                                job_title, idx, resume_dict, matched_keywords, True,
+                                                "passed", resume_text,
+                                            )
+                                            logger.info("#{} 简历符合要求。调用LLM进一步处理。".format(idx))
+
                                             try:
-                                                await driver_utils.say_hi(tab)
-                                            except driver_utils.DailyGreetingLimitReached:
-                                                logger.warning(f"当前职位今日打招呼已达上限，停止处理：{job_title}")
+                                                resume_image_base64, overview_text = await asyncio.wait_for(
+                                                    driver_utils.get_resume(tab, idx),
+                                                    timeout=driver_utils.RESUME_LOAD_TIMEOUT,
+                                                )
+                                            except TimeoutError:
+                                                await driver_utils.raise_if_captcha(tab, 'after resume timeout')
+                                                logger.warning(f"#{idx} 简历加载超时，跳过。")
                                                 await driver_utils.close_resume(tab)
-                                                break
-                                            greeted += 1
+                                                await driver_utils.scroll_down(tab)
+                                                pbar.update(1)
+                                                continue
+                                            is_qualified = llm_utils.is_qualified(client, resume_image_base64, job_requirements['cv_requirements'], overview_text)
+                                            viewed += 1
                                             update_job_stats(job_title, viewed, greeted)
+
+                                            if is_qualified:
+                                                logger.info(f"#{idx} 符合要求，打招呼。")
+                                                try:
+                                                    await driver_utils.say_hi(tab)
+                                                except driver_utils.DailyGreetingLimitReached:
+                                                    logger.warning(f"当前职位今日打招呼已达上限，停止处理：{job_title}")
+                                                    await driver_utils.close_resume(tab)
+                                                    break
+                                                greeted += 1
+                                                update_job_stats(job_title, viewed, greeted)
+                                            else:
+                                                logger.info(f"#{idx} 不符合要求。")
+                                            await driver_utils.close_resume(tab)
+                                            await driver_utils.scroll_down(tab)
+                                            pbar.update(1)
+                                            continue
                                         else:
-                                            logger.info(f"#{idx} 不符合要求。")
-                                        await driver_utils.close_resume(tab)
-                                        await driver_utils.scroll_down(tab)
-                                        pbar.update(1)
-                                        continue
+                                            save_resume_diagnostic(
+                                                job_title, idx, resume_dict, matched_keywords, False,
+                                                "keywords", resume_text,
+                                            )
+                                            logger.info('#{} 关键词不符合要求。'.format(idx))
+                                            await driver_utils.scroll_down(tab)
+                                            pbar.update(1)
+                                            continue
                                     else:
                                         save_resume_diagnostic(
                                             job_title, idx, resume_dict, matched_keywords, False,
-                                            "keywords", resume_text,
+                                            "employment_status", resume_text,
                                         )
-                                        logger.info('#{} 关键词不符合要求。'.format(idx))
+                                        logger.info('#{} 在职情况不符合要求。'.format(idx))
                                         await driver_utils.scroll_down(tab)
                                         pbar.update(1)
                                         continue
                                 else:
                                     save_resume_diagnostic(
                                         job_title, idx, resume_dict, matched_keywords, False,
-                                        "employment_status", resume_text,
+                                        "education", resume_text,
                                     )
-                                    logger.info('#{} 在职情况不符合要求。'.format(idx))
+                                    logger.info('#{} 教育情况不符合要求。'.format(idx))
                                     await driver_utils.scroll_down(tab)
                                     pbar.update(1)
                                     continue
                             else:
                                 save_resume_diagnostic(
                                     job_title, idx, resume_dict, matched_keywords, False,
-                                    "education", resume_text,
+                                    "salary", resume_text,
                                 )
-                                logger.info('#{} 教育情况不符合要求。'.format(idx))
+                                logger.info('#{} 薪资不符合要求。'.format(idx))
                                 await driver_utils.scroll_down(tab)
                                 pbar.update(1)
                                 continue
                         else:
                             save_resume_diagnostic(
                                 job_title, idx, resume_dict, matched_keywords, False,
-                                "salary", resume_text,
+                                    "gender", resume_text,
                             )
-                            logger.info('#{} 薪资不符合要求。'.format(idx))
+                            logger.info('#{} 性别不符合要求。'.format(idx))
                             await driver_utils.scroll_down(tab)
                             pbar.update(1)
                             continue
-                    else:
-                        save_resume_diagnostic(
-                            job_title, idx, resume_dict, matched_keywords, False,
-                                "gender", resume_text,
-                        )
-                        logger.info('#{} 性别不符合要求。'.format(idx))
-                        await driver_utils.scroll_down(tab)
-                        pbar.update(1)
-                        continue
-                await save_age_rejection_diagnostic(
-                    tab,
-                    job_title,
-                    idx,
-                    age,
-                    job_requirements['cv_required_keywords'],
-                )
-                logger.info('#{} 年龄不符合要求。'.format(idx))
-                await driver_utils.scroll_down(tab)
-                pbar.update(1)
-                continue
+                    await save_age_rejection_diagnostic(
+                        tab,
+                        job_title,
+                        idx,
+                        age,
+                        job_requirements['cv_required_keywords'],
+                    )
+                    logger.info('#{} 年龄不符合要求。'.format(idx))
+                    await driver_utils.scroll_down(tab)
+                    pbar.update(1)
+                    continue
 
-            except TimeoutError:
-                logger.warning(f"#{idx} 简历加载超时 ({driver_utils.RESUME_LOAD_TIMEOUT}s)，终止处理。")
-                raise
-            except Exception as e:
-                logger.warning(f"An error occurred: {e}")
-                logger.info("Try next one.")
-                pbar.update(1)
-                continue
+                except TimeoutError:
+                    await driver_utils.raise_if_captcha(tab, 'after recommendation timeout')
+                    logger.warning(f"#{idx} 操作超时，终止处理。")
+                    raise
 
-    log_handler.set_tqdm(None)
+        finally:
+            log_handler.set_tqdm(None)
+
     logger.info(f"简历查看数：{viewed}   打招呼人数：{greeted}")
     return viewed, greeted

@@ -94,10 +94,9 @@ async def main():
 
     # Launch browser once
     browser, tab = await launch_browser(job_configs[0]['url'])
-    await driver_utils.log_in(tab)
-    await driver_utils.close_popover(tab)
-
     try:
+        await driver_utils.log_in(tab)
+        await driver_utils.close_popover(tab)
         # Process each job configuration with WakeLock to prevent system sleep
         with wakelock_utils.WakeLock():
             # Phase 1: inbound greeting candidates (新招呼)
@@ -150,6 +149,8 @@ async def main():
             await asyncio.to_thread(input)
         except (EOFError, KeyboardInterrupt):
             pass
+    except driver_utils.PlatformAccessError as e:
+        log_utils.logger.error(f"账号访问不可用，终止处理：{e}")
     except TimeoutError as e:
         log_utils.logger.warning(f"服务器无响应，终止处理：{e}")
     except (KeyboardInterrupt, asyncio.CancelledError):

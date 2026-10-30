@@ -1,23 +1,30 @@
 import asyncio
 import base64
 import json
+import io
+import math
+import sys
+from PIL import Image
 from log_utils import logger
 import re
-from random import gauss
+from random import gauss, uniform
 from zendriver import cdp
-from zendriver.core.connection import ProtocolException
 
 
 class DailyGreetingLimitReached(Exception):
     """Raised when the platform's daily greeting quota for the current job is exhausted."""
 
 
-class CaptchaRequired(BaseException):
-    """Raised when the platform redirects any frame to the CAPTCHA verification page.
+class CaptchaRequired(RuntimeError):
+    """Raised when the platform requires verification; stop the current run."""
 
-    Inherits BaseException so it is never silently swallowed by bare
-    `except Exception` handlers in the candidate-processing loops.
-    """
+
+class PlatformAccessError(RuntimeError):
+    """Login or account restrictions prevent further processing."""
+
+
+class ResumeCaptureError(RuntimeError):
+    """The complete resume could not be captured; do not evaluate a partial image."""
 
 
 class JobPositionNotFound(RuntimeError):
@@ -49,21 +56,30 @@ async def _any_frame_has_captcha(tab) -> bool:
     """Return True if the main tab or any child frame is showing the CAPTCHA page."""
     if _url_is_captcha(tab.url):
         return True
-    try:
-        frame_tree = await tab.send(cdp.page.get_frame_tree())
-        def _walk(node):
-            if _url_is_captcha(node.frame.url):
-                return True
-            return any(_walk(child) for child in (node.child_frames or []))
-        return _walk(frame_tree)
-    except Exception:
-        return False
+    frame_tree = await tab.send(cdp.page.get_frame_tree())
+    def _walk(node):
+        if _url_is_captcha(node.frame.url):
+            return True
+        return any(_walk(child) for child in (node.child_frames or []))
+    return _walk(frame_tree)
 
 
 async def raise_if_captcha(tab, context: str):
     """Raise immediately when BOSS has redirected the current page or a frame."""
     if await _any_frame_has_captcha(tab):
         raise CaptchaRequired(f"CAPTCHA detected {context}: {tab.url}")
+    path = (tab.url or '').split('?', 1)[0]
+    if '/web/user/' in path or '/web/passport/' in path:
+        raise PlatformAccessError(f"Login required {context}: {path}")
+    restricted = await tab.evaluate("""
+        (() => {
+            const text = document.body ? document.body.innerText : '';
+            return text.includes('安全提示') && text.includes('第三方') &&
+                text.includes('限制') && text.includes('登录');
+        })()
+    """)
+    if restricted:
+        raise PlatformAccessError(f"Account access restricted {context}")
 
 
 async def _find_or_captcha(tab, text: str):
@@ -136,7 +152,7 @@ async def _mouse_click_css(tab, selector: str, warn: bool = True) -> bool:
             if (!el) return null;
             var r = el.getBoundingClientRect();
             if (r.width === 0 && r.height === 0) return null;
-            return JSON.stringify({{x: r.left + r.width / 2, y: r.top + r.height / 2}});
+            return JSON.stringify({{x: r.left + r.width / 2, y: r.top + r.height / 2, width: r.width, height: r.height}});
         }})()
     """)
     if not pos:
@@ -144,7 +160,10 @@ async def _mouse_click_css(tab, selector: str, warn: bool = True) -> bool:
             logger.warning("_mouse_click_css: element not found: %s", selector)
         return False
     coords = json.loads(pos)
-    await tab.mouse_click(coords['x'], coords['y'])
+    await tab.mouse_click(
+        coords['x'] + uniform(-0.2, 0.2) * coords['width'],
+        coords['y'] + uniform(-0.2, 0.2) * coords['height'],
+    )
     return True
 
 
@@ -166,7 +185,7 @@ async def _frame_mouse_click_xpath(tab, xpath: str, warn: bool = True) -> bool:
             var r = el.getBoundingClientRect();
             return JSON.stringify({{
                 x: frameRect.left + r.left + r.width / 2,
-                y: frameRect.top + r.top + r.height / 2
+                y: frameRect.top + r.top + r.height / 2, width: r.width, height: r.height
             }});
         }})()
     """)
@@ -175,7 +194,10 @@ async def _frame_mouse_click_xpath(tab, xpath: str, warn: bool = True) -> bool:
             logger.warning("_frame_mouse_click_xpath: element not found: %s", xpath)
         return False
     coords = json.loads(pos)
-    await tab.mouse_click(coords['x'], coords['y'])
+    await tab.mouse_click(
+        coords['x'] + uniform(-0.2, 0.2) * coords['width'],
+        coords['y'] + uniform(-0.2, 0.2) * coords['height'],
+    )
     return True
 
 
@@ -196,7 +218,7 @@ async def _frame_mouse_click_css(tab, selector: str) -> bool:
             var r = el.getBoundingClientRect();
             return JSON.stringify({{
                 x: frameRect.left + r.left + r.width / 2,
-                y: frameRect.top + r.top + r.height / 2
+                y: frameRect.top + r.top + r.height / 2, width: r.width, height: r.height
             }});
         }})()
     """)
@@ -204,7 +226,10 @@ async def _frame_mouse_click_css(tab, selector: str) -> bool:
         logger.warning("_frame_mouse_click_css: element not found: %s", selector)
         return False
     coords = json.loads(pos)
-    await tab.mouse_click(coords['x'], coords['y'])
+    await tab.mouse_click(
+        coords['x'] + uniform(-0.2, 0.2) * coords['width'],
+        coords['y'] + uniform(-0.2, 0.2) * coords['height'],
+    )
     return True
 
 
@@ -222,10 +247,12 @@ async def log_in(tab):
             if _url_is_captcha(tab.url):
                 raise CaptchaRequired(f"CAPTCHA detected at login: {tab.url}")
         else:
-            logger.warning("Login timeout")
+            raise PlatformAccessError("Login did not reach the chat page within 30 seconds")
     else:
         if _url_is_captcha(tab.url):
             raise CaptchaRequired(f"CAPTCHA detected at login: {tab.url}")
+        if tab.url != 'https://www.zhipin.com/web/chat/index':
+            raise PlatformAccessError(f"Login not confirmed: {tab.url}")
         logger.info("Already logged in.")
 
     logger.info("Logged in.")
@@ -328,27 +355,7 @@ async def get_age(tab, idx) -> int:
     return int(matches[0]) if matches else 99
 
 
-RESUME_LOAD_TIMEOUT = 10  # seconds to wait for resume canvas to appear
-
-# Injected into the c-resume iframe HTML to force CORS mode on all <img> loads.
-# Combined with adding Access-Control-Allow-Origin: * to image responses via Fetch
-# interception, this prevents canvas taint so toDataURL() works without
-# --disable-web-security (which triggers bot detection).
-_CROSSORIGIN_INJECT = """<script>
-(function() {
-    var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
-    if (d && d.set) {
-        Object.defineProperty(HTMLImageElement.prototype, 'src', {
-            set: function(v) { if (!this.crossOrigin) this.crossOrigin = 'anonymous'; d.set.call(this, v); },
-            get: d.get, configurable: true
-        });
-    }
-    var Orig = window.Image;
-    window.Image = function(w, h) { var img = new Orig(w, h); img.crossOrigin = 'anonymous'; return img; };
-    window.Image.prototype = Orig.prototype;
-})();
-</script>"""
-
+RESUME_LOAD_TIMEOUT = 30  # includes loading and screenshot stitching
 
 async def _get_c_resume_frame_ids(tab) -> list:
     """Return all c-resume frame IDs in tree order (oldest first)."""
@@ -363,103 +370,151 @@ async def _get_c_resume_frame_ids(tab) -> list:
     return result
 
 
-async def _read_canvas_b64(tab, frame_id) -> str | None:
-    """Try canvas.toDataURL() inside frame_id. Returns None if canvas absent or tainted."""
-    ctx_id = await tab.send(cdp.page.create_isolated_world(
-        frame_id=frame_id, world_name='canvas_read'
+async def _resume_frame_value(tab, context_id, expression):
+    """Evaluate screenshot geometry in the resume frame, surfacing script errors."""
+    result, error = await tab.send(cdp.runtime.evaluate(
+        expression=expression, context_id=context_id, return_by_value=True,
     ))
-    result, exc = await tab.send(cdp.runtime.evaluate(
-        expression="""
-            (function() {
-                var c = document.querySelector('canvas#resume');
-                if (!c) return null;
-                try { return c.toDataURL('image/png').substring(22); }
-                catch(e) { return null; }
-            })()
-        """,
-        context_id=ctx_id,
-        return_by_value=True,
-    ))
-    if exc or not result or not result.value:
-        return None
+    if error:
+        raise ResumeCaptureError(f"Resume geometry failed: {error.text}")
     return result.value
 
 
-async def _enable_cors_intercept(tab):
-    """Enable Fetch interception to un-taint the resume canvas.
+async def _read_resume_screenshot(tab, frame_id) -> str | None:
+    """Capture visible canvas strips and stitch a full PNG without reading canvas pixels.
 
-    Intercepts:
-    - c-resume HTML responses: injects a <script> that sets crossOrigin='anonymous'
-      on all <img> elements before their src is assigned.
-    - Image responses: adds Access-Control-Allow-Origin: * so the browser accepts
-      the CORS response and does not taint the canvas.
+    Scroll positions are restored even on cancellation. No script elements are inserted; image prototypes, CORS headers and canvas
+    contents are left intact.
     """
-    async def _handle_paused(evt: cdp.fetch.RequestPaused):
-        req_id = evt.request_id
-        status_code = evt.response_status_code
-
+    context = await tab.send(cdp.page.create_isolated_world(
+        frame_id=frame_id, world_name='resume_screenshot',
+    ))
+    size = await _resume_frame_value(tab, context, """
+        (() => {
+            const c = document.querySelector('canvas#resume');
+            if (!c || !c.width || !c.height || document.readyState !== 'complete') return null;
+            if (Array.from(document.images).some(i => !i.complete || !i.naturalWidth)) return null;
+            const r = c.getBoundingClientRect();
+            if (!r.width || !r.height) return null;
+            return {width: r.width, height: r.height};
+        })()
+    """)
+    if size is None:
+        return None
+    canvas, error = await tab.send(cdp.runtime.evaluate(
+        expression="document.querySelector('canvas#resume')", context_id=context,
+    ))
+    if error:
+        raise ResumeCaptureError(error.text)
+    await _resume_frame_value(tab, context, """
+        (() => {
+            const positions = [];
+            for (let e = document.querySelector('canvas#resume').parentElement; e; e = e.parentElement)
+                positions.push([e, e.scrollLeft, e.scrollTop]);
+            globalThis.resumeScrollPositions = positions;
+            globalThis.resumeWindowScroll = [scrollX, scrollY];
+            return true;
+        })()
+    """)
+    tree = await tab.send(cdp.page.get_frame_tree())
+    def frame_path(node, parents):
+        path = parents + [node.frame.id_]
+        if node.frame.id_ == frame_id:
+            return path
+        for child in node.child_frames or []:
+            found = frame_path(child, path)
+            if found:
+                return found
+        return None
+    path = frame_path(tree, [])
+    if path is None:
+        raise ResumeCaptureError('Resume frame disappeared before capture')
+    owners = []
+    for fid in path[1:]:
+        owner, _ = await tab.send(cdp.dom.get_frame_owner(fid))
+        owners.append(owner)
+    output = Image.new('RGB', (math.ceil(size['width']), math.ceil(size['height'])))
+    offset = 0
+    try:
+        while offset < output.height:
+            await raise_if_captcha(tab, 'while capturing resume')
+            visible = await _resume_frame_value(tab, context, f"""
+                (() => {{
+                    const c = document.querySelector('canvas#resume');
+                    for (let e = c.parentElement; e; e = e.parentElement) {{
+                        if (e.scrollHeight > e.clientHeight && /auto|scroll|hidden/.test(getComputedStyle(e).overflowY)) {{
+                            const r = c.getBoundingClientRect(), p = e.getBoundingClientRect();
+                            e.scrollTop += r.top + {offset} - p.top - e.clientTop;
+                        }}
+                    }}
+                    window.scrollBy(0, c.getBoundingClientRect().top + {offset});
+                    const r = c.getBoundingClientRect();
+                    let top = 0, bottom = innerHeight, left = 0, right = innerWidth;
+                    for (let e = c.parentElement; e; e = e.parentElement) {{
+                        const p = e.getBoundingClientRect(), style = getComputedStyle(e);
+                        if (/auto|scroll|hidden|clip/.test(style.overflowY)) {{
+                            top = Math.max(top, p.top + e.clientTop);
+                            bottom = Math.min(bottom, p.top + e.clientTop + e.clientHeight);
+                        }}
+                        if (/auto|scroll|hidden|clip/.test(style.overflowX)) {{
+                            left = Math.max(left, p.left + e.clientLeft);
+                            right = Math.min(right, p.left + e.clientLeft + e.clientWidth);
+                        }}
+                    }}
+                    return {{top: Math.max(0, top-r.top), bottom: Math.min(r.height, bottom-r.top),
+                        left: Math.max(0, left-r.left), right: Math.min(r.width, right-r.left)}};
+                }})()
+            """)
+            # Let the compositor paint after scrolling before taking the screenshot.
+            await asyncio.sleep(0.05)
+            box = await tab.send(cdp.dom.get_box_model(object_id=canvas.object_id))
+            x, y = box.content[0], box.content[1]
+            metrics = await tab.send(cdp.page.get_layout_metrics())
+            viewport = metrics[3]  # CSS layout viewport (not device pixels)
+            top = max(offset, math.ceil(visible['top']), math.ceil(viewport.page_y - y))
+            bottom = min(output.height, math.floor(visible['bottom']),
+                         math.floor(viewport.page_y + viewport.client_height - y))
+            left = max(visible['left'], viewport.page_x - x)
+            right = min(visible['right'], viewport.page_x + viewport.client_width - x)
+            for owner in owners:
+                frame_box = await tab.send(cdp.dom.get_box_model(backend_node_id=owner))
+                q = frame_box.content
+                top = max(top, math.ceil(q[1] - y))
+                bottom = min(bottom, math.floor(q[5] - y))
+                left = max(left, q[0] - x)
+                right = min(right, q[2] - x)
+            if top > offset or bottom <= offset or left > 0.5 or right < size['width'] - 0.5:
+                raise ResumeCaptureError('Resume is clipped or cannot be scrolled completely into view')
+            encoded = await tab.send(cdp.page.capture_screenshot(
+                format_='png', capture_beyond_viewport=False,
+                clip=cdp.page.Viewport(x=x, y=y + offset, width=size['width'],
+                                       height=bottom-offset, scale=1),
+            ))
+            with Image.open(io.BytesIO(base64.b64decode(encoded))) as strip:
+                output.paste(strip.resize((output.width, bottom-offset)), (0, offset))
+            offset = bottom
+    finally:
+        active_error = sys.exception()
         try:
-            if status_code is None:
-                await tab.send(cdp.fetch.continue_request(request_id=req_id))
-                return
-
-            resource_type = evt.resource_type
-
-            if resource_type == cdp.network.ResourceType.DOCUMENT and 'c-resume' in evt.request.url:
-                body, b64_enc = await tab.send(cdp.fetch.get_response_body(request_id=req_id))
-                if b64_enc:
-                    body = base64.b64decode(body).decode('utf-8', errors='replace')
-                body = body.replace('<head>', '<head>' + _CROSSORIGIN_INJECT, 1)
-                await tab.send(cdp.fetch.fulfill_request(
-                    request_id=req_id,
-                    response_code=status_code,
-                    response_headers=evt.response_headers,
-                    body=base64.b64encode(body.encode('utf-8')).decode(),
-                ))
-
-            elif resource_type == cdp.network.ResourceType.IMAGE:
-                body, b64_enc = await tab.send(cdp.fetch.get_response_body(request_id=req_id))
-                if not b64_enc:
-                    body = base64.b64encode(body.encode()).decode()
-                headers = [
-                    h for h in (evt.response_headers or [])
-                    if h.name.lower() != 'access-control-allow-origin'
-                ]
-                headers.append(cdp.fetch.HeaderEntry(name='Access-Control-Allow-Origin', value='*'))
-                await tab.send(cdp.fetch.fulfill_request(
-                    request_id=req_id,
-                    response_code=status_code,
-                    response_headers=headers,
-                    body=body,
-                ))
-
-            else:
-                await tab.send(cdp.fetch.continue_response(
-                    request_id=req_id,
-                    response_code=status_code,
-                    response_headers=evt.response_headers,
-                ))
-        except ProtocolException:
-            return
-
-    tab.add_handler(cdp.fetch.RequestPaused, _handle_paused)
-    await tab.send(cdp.fetch.enable(patterns=[
-        cdp.fetch.RequestPattern(
-            url_pattern='*c-resume*',
-            resource_type=cdp.network.ResourceType.DOCUMENT,
-            request_stage=cdp.fetch.RequestStage.RESPONSE,
-        ),
-        cdp.fetch.RequestPattern(
-            url_pattern='*',
-            resource_type=cdp.network.ResourceType.IMAGE,
-            request_stage=cdp.fetch.RequestStage.RESPONSE,
-        ),
-    ]))
-
-
-async def _disable_cors_intercept(tab):
-    tab.remove_handlers(cdp.fetch.RequestPaused)
-    await tab.send(cdp.fetch.disable())
+            await _resume_frame_value(tab, context, """
+                (() => {
+                    for (const [e, x, y] of globalThis.resumeScrollPositions) e.scrollTo(x, y);
+                    window.scrollTo(...globalThis.resumeWindowScroll);
+                    delete globalThis.resumeScrollPositions;
+                    delete globalThis.resumeWindowScroll;
+                    return true;
+                })()
+            """)
+            await tab.send(cdp.runtime.release_object(canvas.object_id))
+        except Exception:
+            if active_error is None:
+                raise
+            logger.warning("恢复简历截图状态失败，保留原始异常", exc_info=True)
+    if all(low == high for low, high in output.getextrema()):
+        return None  # The canvas has dimensions but has not painted its content yet.
+    buffer = io.BytesIO()
+    output.save(buffer, format='PNG')
+    return base64.b64encode(buffer.getvalue()).decode()
 
 
 async def get_resume(tab, idx) -> tuple[str | None, str]:
@@ -470,25 +525,18 @@ async def get_resume(tab, idx) -> tuple[str | None, str]:
     # currently visible resume is always the newest frame, not the first one.
     existing_fids = set(await _get_c_resume_frame_ids(tab))
 
-    await _enable_cors_intercept(tab)
-    try:
-        await _frame_mouse_click_xpath(tab, xpath_resume_card.format(i=idx))
+    if not await _frame_mouse_click_xpath(tab, xpath_resume_card.format(i=idx)):
+        raise ResumeCaptureError(f"Resume card not found: {idx}")
 
-        # Poll until canvas is ready; timeout enforced by asyncio.wait_for() in caller
-        while True:
-            if await _any_frame_has_captcha(tab):
-                raise CaptchaRequired("CAPTCHA detected while loading resume")
-            all_fids = await _get_c_resume_frame_ids(tab)
-            new_fids = [f for f in all_fids if f not in existing_fids]
-            # Prefer the newly created frame; fall back to the last known one
-            fid = new_fids[-1] if new_fids else (all_fids[-1] if all_fids else None)
-            if fid:
-                canvas_base64 = await _read_canvas_b64(tab, fid)
-                if canvas_base64 is not None:
-                    break
-            await asyncio.sleep(1)
-    finally:
-        await _disable_cors_intercept(tab)
+    while True:
+        await raise_if_captcha(tab, 'while loading resume')
+        all_fids = await _get_c_resume_frame_ids(tab)
+        new_fids = [f for f in all_fids if f not in existing_fids]
+        if new_fids:
+            canvas_base64 = await _read_resume_screenshot(tab, new_fids[-1])
+            if canvas_base64 is not None:
+                break
+        await asyncio.sleep(0.2)
 
     # Extract the "经历概览" sidebar text from the recommendFrame DOM
     overview_text = await _in_frame(tab, """
@@ -675,7 +723,7 @@ xpath_greeting_unread_badge = './/span[contains(@class,"badge-count")]'
 xpath_greeting_job_sub = './/span[@class="source-job"]'
 xpath_chat_job_title = '//*[contains(@class,"source-job")]'  # same class used in list items
 
-GREETING_RESUME_LOAD_TIMEOUT = 15  # seconds
+GREETING_RESUME_LOAD_TIMEOUT = RESUME_LOAD_TIMEOUT
 
 
 async def goto_new_greetings(tab) -> int:
@@ -772,39 +820,26 @@ async def get_current_chat_job_title(tab) -> str:
 
 
 async def open_online_resume_greeting(tab):
-    """Click 在线简历 button in the chat panel header.
-
-    Enables Fetch CORS intercept before clicking so the c-resume iframe loads
-    with untainted canvas from the start. Caller must ensure get_online_resume_greeting()
-    is called afterwards (it disables the intercept on exit).
-    """
+    """Click 在线简历 in the chat panel header."""
     # The 在线简历 button sits at ~(1438, 139) which falls inside the interview
     # hover-panel's z-index:100 overlay (1093-1553, 50-205).  Move the mouse
     # to a safe area first so the panel collapses before we try to click.
     await dismiss_hover_panels(tab)
-    await _enable_cors_intercept(tab)
     btn = await _find_or_captcha(tab, "在线简历")
     await btn.click()
     await asyncio.sleep(jitter(2))
 
 
 async def get_online_resume_greeting(tab) -> tuple[str | None, str]:
-    """Wait for canvas resume and return (base64_png, overview_text).
-
-    Disables the Fetch CORS intercept (set up by open_online_resume_greeting) on exit.
-    """
-    try:
-        while True:
-            if await _any_frame_has_captcha(tab):
-                raise CaptchaRequired("CAPTCHA detected while loading resume")
-            fids = await _get_c_resume_frame_ids(tab)
-            if fids:
-                canvas_b64 = await _read_canvas_b64(tab, fids[-1])
-                if canvas_b64 is not None:
-                    break
-            await asyncio.sleep(1)
-    finally:
-        await _disable_cors_intercept(tab)
+    """Wait for the visible resume and return a full screenshot and overview."""
+    while True:
+        await raise_if_captcha(tab, 'while loading greeting resume')
+        fids = await _get_c_resume_frame_ids(tab)
+        if fids:
+            canvas_b64 = await _read_resume_screenshot(tab, fids[-1])
+            if canvas_b64 is not None:
+                break
+        await asyncio.sleep(0.2)
 
     overview_text = await tab.evaluate("""
         (function() {

@@ -51,11 +51,14 @@ class _SelectedJobTab:
     def __init__(self, selected_label, option_labels=None):
         self.selected_label = selected_label
         self.evaluate = AsyncMock(side_effect=[
+            False,
+            False,
             option_labels or [
                 "私域电商主播 _ 广州 9-12K",
                 "私域电商主播 _ 广州 15-20K 待",
             ],
             '{"x": 100, "y": 200}',
+            False,
             selected_label,
             None,
         ])

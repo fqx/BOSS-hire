@@ -11,7 +11,7 @@ This is a Python-based resume screening automation tool that uses OpenAI's GPT m
 The codebase is organized into modular utility files:
 
 - **main.py** - Async entry point (`asyncio.run`): launches zendriver browser, processes job configurations, coordinates candidate screening
-- **driver_utils.py** - zendriver (CDP-based) browser automation utilities: login, navigation, UI interactions with job platform. All functions are async. All clicks use real CDP mouse events (`tab.mouse_click`) to produce `isTrusted=true` events and avoid bot detection. Helper functions `_mouse_click_css`, `_frame_mouse_click_css`, `_frame_mouse_click_xpath` compute element coordinates via `tab.evaluate()` (combining iframe offset + element offset for `recommendFrame` elements) then dispatch real mouse clicks. CDP Fetch interception (`_enable_cors_intercept`) is used to inject `crossOrigin='anonymous'` into resume iframes and add CORS headers to image responses so `canvas.toDataURL()` works without tainting. `dismiss_hover_panels` moves the mouse to a neutral position to collapse CSS hover-triggered nav panels before clicking in their vicinity.
+- **driver_utils.py** - Async zendriver/CDP browser utilities. Shared CSS/XPath click helpers choose points within the central 40% of each element, adding the `recommendFrame` offset for iframe elements. Resume images are PNG screenshots stitched from visible canvas strips via CDP, with scroll positions restored on exit. Capture fails if the complete canvas cannot be shown. `CaptchaRequired`, `PlatformAccessError`, browser failures and unexpected errors propagate to stop the run; only per-resume load timeouts are skipped after closing the dialog. `dismiss_hover_panels` collapses hover-triggered navigation before nearby clicks.
 - **job_utils.py** - Job processing logic: candidate evaluation loop, requirement matching, statistics tracking
 - **llm_utils.py** - OpenAI integration with structured evaluation system: candidate qualification assessment using Pydantic models
 - **log_utils.py** - Custom logging system with tqdm integration and multiple output handlers (console + file)
@@ -56,7 +56,7 @@ Multiple job configurations can be processed in a single run by providing an arr
 
 ## Key Dependencies
 
-- **zendriver**: CDP-based async browser automation, undetectable by anti-bot systems
+- **zendriver**: CDP-based async browser automation
 - **openai**: AI-powered candidate evaluation 
 - **pydantic**: Structured data validation for evaluation responses
 - **tqdm**: Progress tracking with custom logging integration
