@@ -501,7 +501,7 @@ async def confirm_initial_greeting(session, chat_nodes):
 
 
 async def loop_recommend(session, max_idx, requirements, client, stats, job_title,
-                         allow_contact=False, rejection_reviewer=None):
+                         allow_contact=False, rejection_reviewer=None, mark_rejections=True):
     counters = stats.setdefault(job_title, {})
     for key in ("viewed", "qualified", "greeted", "scanned",
                 "card_prefilter_skipped", "card_field_skipped"):
@@ -595,6 +595,11 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
                 if allow_contact:
                     current = await session.snapshot()
                     if not is_resume(current) or page_identity(current) != assessed_page:
+                        current_page = page_identity(current)
+                        logger.llm(
+                            f"联系前简历页面变化；消失节点：{tuple(n for n in assessed_page if n not in current_page)!r}；"
+                            f"新增节点：{tuple(n for n in current_page if n not in assessed_page)!r}"
+                        )
                         raise NativeDriverError("评估期间简历页面或候选人发生变化，停止联系")
                     await session.press_label("立即沟通")
                     chat_nodes = await session.wait(lambda ns: has_label(ns, "求简历"), "沟通页面")
@@ -606,6 +611,8 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
                     logger.info("候选人符合要求；只读模式，未打招呼")
             elif result is None:
                 logger.warning("LLM 评估失败，跳过当前候选人")
+            elif allow_contact and not mark_rejections:
+                logger.info("推荐候选人不符合要求；推荐不合适标记已暂停，返回列表")
             elif allow_contact:
                 # 默认按模型结论自动标记；显式开启复核时逐人确认，未获确认的
                 # 结论保留待复核，不把允许联系当作自动淘汰授权。
@@ -620,6 +627,11 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
                 if approved is True:
                     current = await session.snapshot()
                     if not is_resume(current) or page_identity(current) != assessed_page:
+                        current_page = page_identity(current)
+                        logger.llm(
+                            f"标记前简历页面变化；消失节点：{tuple(n for n in assessed_page if n not in current_page)!r}；"
+                            f"新增节点：{tuple(n for n in current_page if n not in assessed_page)!r}"
+                        )
                         raise NativeDriverError("评估期间简历页面或候选人发生变化，停止标记")
                     assessed_page_now = page_identity(current)
 
@@ -675,7 +687,8 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
 
 
 async def run_native(job_configs, client, stats, *, allow_contact=False,
-                     greetings=True, recommend=True, driver=None, rejection_reviewer=None):
+                     greetings=True, recommend=True, driver=None, rejection_reviewer=None,
+                     mark_recommend_rejections=True):
     from native_driver import NativeDriver
     from native_greetings import loop_greetings
 
@@ -684,9 +697,12 @@ async def run_native(job_configs, client, stats, *, allow_contact=False,
         review_options = {"rejection_reviewer": rejection_reviewer} if rejection_reviewer is not None else {}
         await loop_greetings(session, job_configs, client, stats, allow_contact=allow_contact, **review_options)
     if recommend:
+        if allow_contact and not mark_recommend_rejections:
+            logger.info("推荐不合适标记已暂停，保留简历评估与合适候选人联系")
         for params in job_configs:
             requirements = job_utils.get_job_requirements(params["job_requirements"])
             await session.select_job(params["job_title"], requirements["selector_job_title"])
             await loop_recommend(session, params.get("max_idx", 120), requirements,
                                  client, stats, params["job_title"], allow_contact,
-                                 rejection_reviewer=rejection_reviewer)
+                                 rejection_reviewer=rejection_reviewer,
+                                 mark_rejections=mark_recommend_rejections)

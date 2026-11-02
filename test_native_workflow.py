@@ -803,6 +803,35 @@ class NativeRecommendationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("awaiting_review", stats["市场专员"])
         session.return_to_candidates.assert_awaited_once()
 
+    async def test_pausing_recommendation_rejections_preserves_contact_without_marking_or_review(self):
+        for qualified in (False, True):
+            session = self.make_session(resume="32岁 大专\n求职期望\n面议\n工作经历\n医药销售")
+            reviewer = AsyncMock()
+            stats = {}
+            result = SimpleNamespace(is_qualified=qualified, reason_category="过往经历不符", reason="评估理由")
+            with self.subTest(qualified=qualified), \
+                 patch.object(native_workflow.llm_utils, "is_qualified_text_result", return_value=result), \
+                 patch.object(job_utils, "save_resume_diagnostic"), \
+                 patch.object(native_workflow, "confirm_initial_greeting", new=AsyncMock()) as confirm, \
+                 patch("native_greetings.mark_unsuitable", new=AsyncMock()) as mark:
+                await native_workflow.loop_recommend(
+                    session, 1, job_utils.get_job_requirements({"cv_requirements": "医药销售"}),
+                    "client", stats, "市场专员", allow_contact=True,
+                    rejection_reviewer=reviewer, mark_rejections=False,
+                )
+            mark.assert_not_awaited()
+            reviewer.assert_not_awaited()
+            self.assertNotIn("awaiting_review", stats["市场专员"])
+            self.assertNotIn("marked_unsuitable", stats["市场专员"])
+            self.assertEqual(stats["市场专员"]["greeted"], int(qualified))
+            if qualified:
+                session.press_label.assert_awaited_once_with("立即沟通")
+                confirm.assert_awaited_once()
+            else:
+                session.press_label.assert_not_awaited()
+                confirm.assert_not_awaited()
+            session.return_to_candidates.assert_awaited_once()
+
     async def test_unqualified_recommendation_review_denial_queues_without_marking(self):
         resume = "32岁 大专\n求职期望\n面议\n工作经历\n医药销售"
         session = self.make_session(resume=resume)
@@ -1149,7 +1178,7 @@ class NativeRunTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             events.append(("selected", title))
         async def screen(session, maximum, requirements, client, stats, title, allow_contact,
-                         rejection_reviewer=None):
+                         rejection_reviewer=None, mark_rejections=True):
             self.assertEqual(events[-1], ("selected", title))
             await asyncio.sleep(0)
             events.append(("screened", title))
@@ -1170,7 +1199,8 @@ class NativeRunTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(recommend.await_args_list, [
             call(session, config.get("max_idx", 120), job_utils.get_job_requirements(config["job_requirements"]),
-                 "client", stats, config["job_title"], False, rejection_reviewer=None) for config in configs
+                 "client", stats, config["job_title"], False, rejection_reviewer=None,
+                 mark_rejections=True) for config in configs
         ])
         self.assertEqual(configs, original)
         greetings.assert_not_awaited()
@@ -1210,7 +1240,7 @@ class NativeRunTests(unittest.IsolatedAsyncioTestCase):
         greetings.assert_not_awaited()
         recommend.assert_awaited_once_with(
             session, 2, job_utils.get_job_requirements({}), "client", stats, "市场专员", False,
-            rejection_reviewer=None,
+            rejection_reviewer=None, mark_rejections=True,
         )
 
 

@@ -5,9 +5,13 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unicodedata
+
+from log_utils import logger
+from timing_utils import jitter
 
 
 class NativeDriverError(RuntimeError):
@@ -16,6 +20,10 @@ class NativeDriverError(RuntimeError):
 
 class NativeStaleElementError(NativeDriverError):
     """The bridge rejected an outdated target before performing its action."""
+
+
+class NativeSnapshotInvalidatedError(NativeDriverError):
+    """An element disappeared while the bridge was reading a snapshot."""
 
 
 class NativeNetworkError(NativeDriverError):
@@ -77,6 +85,12 @@ class NativeDriver:
                 "Stale accessibility element: role or description changed",
             ):
                 raise NativeStaleElementError(message)
+            if (
+                len(args) > 1 and args[1] == "snapshot"
+                and isinstance(details, dict) and isinstance(details.get("error"), str)
+                and re.fullmatch(r"Cannot read (?:AX[A-Za-z]+|actions): AX error -25202", details["error"])
+            ):
+                raise NativeSnapshotInvalidatedError(message)
             raise NativeDriverError(message)
         return stdout
 
@@ -102,7 +116,16 @@ class NativeDriver:
 
     async def snapshot(self) -> list[AXNode]:
         binary = await self._prepare()
-        data = json.loads(await self._run(binary, "snapshot", self.bundle_id))
+        for attempt in range(3):
+            try:
+                data = json.loads(await self._run(binary, "snapshot", self.bundle_id))
+                break
+            except NativeSnapshotInvalidatedError:
+                if attempt == 2:
+                    raise
+                # Discard the entire tree; paths from a partial read are unsafe.
+                logger.info("读取期间辅助功能元素失效，重新获取完整快照（第 %s 次重试）", attempt + 1)
+                await asyncio.sleep(jitter(0.2))
         if not isinstance(data, list):
             raise NativeDriverError("Accessibility bridge returned an invalid snapshot")
         nodes = []

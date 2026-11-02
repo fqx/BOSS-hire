@@ -41,7 +41,8 @@ This is the first and most critical gate.
 - **Identify Job's Minimum Salary:**
     - From the job's salary range (e.g., 5k-6k), use the lower bound (5k).
     - If not provided, the value is "Unknown".
-- **Apply the Rule:** The candidate is **disqualified** if `Candidate's Minimum Salary > (Job's Minimum Salary * 1.5)`.
+- **Job Salary Unknown:** If the job's minimum salary is "Unknown", the salary check **passes**, whether the candidate's salary is known or unknown. Continue to Step 2. Do not invent a job salary or disqualify the candidate because the job omitted it.
+- **Apply the Rule (Both Salaries Known):** The candidate is **disqualified** if `Candidate's Minimum Salary > (Job's Minimum Salary * 1.5)`.
     - **Example:** If the job is 10k-15k, the minimum is 10k. The maximum acceptable candidate minimum is `10k * 1.5 = 15k`. A candidate asking for a minimum of 16k is disqualified.
 - **Unknown Information Rule:** If the candidate's minimum salary is "Unknown" and the job's minimum salary is not "Unknown", the check **fails**. The candidate is disqualified.
 - **Proceed or Stop:** If the salary check fails, stop all further analysis. The candidate is not qualified. If it passes, proceed to Step 2.

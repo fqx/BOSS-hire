@@ -291,6 +291,53 @@ class NativeDriverTests(unittest.IsolatedAsyncioTestCase):
              self.assertRaisesRegex(NativeDriverError, "permission"):
             await NativeDriver()._run("bridge")
 
+    async def test_snapshot_restarts_after_element_invalidated_during_read(self):
+        failed = Mock(returncode=1, communicate=AsyncMock(return_value=(
+            b"", b'{"error":"Cannot read AXTitle: AX error -25202"}',
+        )))
+        complete = Mock(returncode=0, communicate=AsyncMock(return_value=(b"[]", b"")))
+        driver = NativeDriver()
+        with patch.object(driver, "_prepare", AsyncMock(return_value="bridge")), \
+             patch("native_driver.asyncio.create_subprocess_exec", AsyncMock(side_effect=[failed, complete])) as start, \
+             patch("native_driver.asyncio.sleep", AsyncMock()) as sleep:
+            self.assertEqual(await driver.snapshot(), [])
+        self.assertEqual(start.await_count, 2)
+        sleep.assert_awaited_once()
+
+    async def test_snapshot_stops_after_three_invalidated_reads(self):
+        failed = Mock(returncode=1, communicate=AsyncMock(return_value=(
+            b"", b'{"error":"Cannot read AXTitle: AX error -25202"}',
+        )))
+        driver = NativeDriver()
+        with patch.object(driver, "_prepare", AsyncMock(return_value="bridge")), \
+             patch("native_driver.asyncio.create_subprocess_exec", AsyncMock(return_value=failed)) as start, \
+             patch("native_driver.asyncio.sleep", AsyncMock()) as sleep, \
+             self.assertRaisesRegex(NativeDriverError, "-25202"):
+            await driver.snapshot()
+        self.assertEqual(start.await_count, 3)
+        self.assertEqual(sleep.await_count, 2)
+
+    async def test_snapshot_other_errors_and_action_invalidations_are_not_retried(self):
+        for command, error in (
+            ("snapshot", "Cannot read AXTitle: AX error -25204"),
+            ("snapshot", "Accessibility permission is required"),
+            ("action", "Cannot read AXTitle: AX error -25202"),
+        ):
+            failed = Mock(returncode=1, communicate=AsyncMock(return_value=(
+                b"", json.dumps({"error": error}).encode(),
+            )))
+            driver = NativeDriver()
+            with self.subTest(command=command, error=error), \
+                 patch.object(driver, "_prepare", AsyncMock(return_value="bridge")), \
+                 patch("native_driver.asyncio.create_subprocess_exec", AsyncMock(return_value=failed)) as start, \
+                 self.assertRaises(NativeDriverError) as raised:
+                if command == "snapshot":
+                    await driver.snapshot()
+                else:
+                    await driver.perform(node(), "press")
+            self.assertIs(type(raised.exception), NativeDriverError)
+            start.assert_awaited_once()
+
     async def test_exact_pre_action_stale_errors_have_a_distinct_type(self):
         for error in ("Stale accessibility path", "Stale accessibility element: role or description changed"):
             stderr = json.dumps({"error": error})

@@ -50,6 +50,20 @@ class NativeEntrypointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(loop.await_args.kwargs["rejection_reviewer"], reviewer)
         self.assertIs(loop.await_args.args[0].driver, driver)
 
+    async def test_recommendation_rejection_pause_does_not_disable_inbound_contact(self):
+        configs = [{"job_title": "市场专员", "job_requirements": {}}]
+        with patch("native_greetings.loop_greetings", new=AsyncMock()) as inbound, \
+             patch.object(native_workflow.NativeSession, "select_job", new=AsyncMock()), \
+             patch.object(native_workflow, "loop_recommend", new=AsyncMock()) as recommend:
+            await native_workflow.run_native(
+                configs, "client", {}, driver=object(), allow_contact=True,
+                mark_recommend_rejections=False,
+            )
+        self.assertTrue(inbound.await_args.kwargs["allow_contact"])
+        self.assertNotIn("mark_rejections", inbound.await_args.kwargs)
+        self.assertFalse(recommend.await_args.kwargs["mark_rejections"])
+        self.assertTrue(recommend.await_args.args[-1])
+
     def test_cli_defaults_to_native_contact_without_individual_prompts(self):
         with patch("sys.argv", ["main.py"]):
             args = main.get_arguments()
@@ -119,6 +133,7 @@ class NativeEntrypointTests(unittest.IsolatedAsyncioTestCase):
         run.assert_awaited_once_with(
             configs, "client", main.job_stats, allow_contact=False,
             greetings=main.ENABLE_GREETINGS_LOOP, recommend=main.ENABLE_RECOMMEND_LOOP,
+            mark_recommend_rejections=main.ENABLE_RECOMMEND_REJECTIONS,
         )
         final.assert_called_once()
 

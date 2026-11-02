@@ -63,8 +63,9 @@ func rect(_ element: AXUIElement) throws -> [String: Double] {
 func run() throws -> Any {
     let args = CommandLine.arguments
     guard args.count >= 3 else { throw BridgeError("Usage: AccessibilityBridge snapshot|window-info|action bundle-id [JSON]") }
-    guard AXIsProcessTrusted() else {
-        throw BridgeError("Accessibility permission is required for the executing application in System Settings > Privacy & Security > Accessibility")
+    let trustOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+    guard AXIsProcessTrustedWithOptions(trustOptions) else {
+        throw BridgeError("缺少辅助功能权限，已请求系统授权提示。请在“系统设置 → 隐私与安全性 → 辅助功能”中允许启动脚本的应用（从 PyCharm 运行时检查 PyCharm），授权后重新运行；必要时退出并重新打开该应用。")
     }
     let apps = NSRunningApplication.runningApplications(withBundleIdentifier: args[2])
     guard apps.count == 1, let app = apps.first else {

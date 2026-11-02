@@ -18,6 +18,7 @@ OPENAI_BASE_URL = os.getenv('OPENAI_BASE_URL')
 
 ENABLE_GREETINGS_LOOP = os.getenv('DISABLE_GREETINGS_LOOP', 'false').lower() != 'true'
 ENABLE_RECOMMEND_LOOP = os.getenv('DISABLE_RECOMMEND_LOOP', 'false').lower() != 'true'
+ENABLE_RECOMMEND_REJECTIONS = os.getenv('DISABLE_RECOMMEND_REJECTIONS', 'false').lower() != 'true'
 
 # Global variable to store job statistics
 job_stats = {}
@@ -160,6 +161,7 @@ async def main():
                     allow_contact=args.allow_contact,
                     greetings=ENABLE_GREETINGS_LOOP,
                     recommend=ENABLE_RECOMMEND_LOOP,
+                    mark_recommend_rejections=ENABLE_RECOMMEND_REJECTIONS,
                     **review_options,
                 )
         except NativeDailyLimitError as error:
