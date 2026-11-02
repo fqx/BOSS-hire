@@ -113,6 +113,16 @@ class NativeResumeParsingTests(unittest.TestCase):
 
 
 class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mark_quota_is_identified_before_network_banner_and_allows_navigation_afterwards(self):
+        nodes = [node((0,), "网络连接失败，请检查网络", "AXButton"),
+                 node((1,), "标记不合格数已达到上限")]
+        session = native_workflow.NativeSession(SimpleNamespace(snapshot=AsyncMock(return_value=nodes)))
+        with self.assertRaises(native_workflow.NativeMarkLimitError):
+            await session.snapshot()
+        self.assertFalse(session.greeting_mark_limit_reached)
+        self.assertFalse(session.recommend_mark_limit_reached)
+        self.assertEqual(await session.snapshot(allow_network_error=True), nodes)
+
     async def test_real_recently_followed_resume_layout_is_valid_at_stopped_top_boundary(self):
         scroll = node((0,), role="AXGroup", actions=("AXScrollUpByPage",))
         nodes = [scroll, node((1,), "赖女士"), node((2,), "在职-考虑机会, 大专, 32岁"),
@@ -638,6 +648,40 @@ class NativeHistoryFilterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NativeRecommendationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prior_unconfirmed_mark_skips_next_mark_and_returns_to_list(self):
+        session = self.make_session(resume="32岁 大专\n求职期望\n面议\n工作经历\n医药销售")
+        session.recommend_mark_result_unknown = True
+        stats = {}
+        result = SimpleNamespace(is_qualified=False, reason_category="过往经历不符")
+        with patch.object(native_workflow.llm_utils, "is_qualified_text_result", return_value=result), \
+             patch.object(job_utils, "save_resume_diagnostic"), \
+             patch("native_greetings.mark_unsuitable", new=AsyncMock()) as mark:
+            await native_workflow.loop_recommend(
+                session, 1, job_utils.get_job_requirements({"cv_requirements": "医药销售"}),
+                "client", stats, "市场专员", allow_contact=True,
+            )
+        mark.assert_not_awaited()
+        session.return_to_candidates.assert_awaited_once()
+        self.assertEqual(stats["市场专员"]["mark_unconfirmed_skipped"], 1)
+
+    async def test_mark_quota_returns_to_candidates_without_success_count(self):
+        session = self.make_session(resume="32岁 大专\n求职期望\n面议\n工作经历\n医药销售")
+        session.greeting_mark_limit_reached = True
+        stats = {}
+        result = SimpleNamespace(is_qualified=False, reason_category="过往经历不符")
+        with patch.object(native_workflow.llm_utils, "is_qualified_text_result", return_value=result), \
+             patch.object(job_utils, "save_resume_diagnostic"), \
+             patch("native_greetings.mark_unsuitable", new=AsyncMock(side_effect=native_workflow.NativeMarkLimitError("标记额度已满"))) as mark:
+            await native_workflow.loop_recommend(
+                session, 1, job_utils.get_job_requirements({"cv_requirements": "医药销售"}),
+                "client", stats, "市场专员", allow_contact=True,
+            )
+        mark.assert_awaited_once()
+        session.return_to_candidates.assert_awaited_once()
+        self.assertEqual(stats["市场专员"]["mark_limit_skipped"], 1)
+        self.assertNotIn("marked_unsuitable", stats["市场专员"])
+        self.assertTrue(session.recommend_mark_limit_reached)
+
     def make_session(self, resume=None, error=None):
         self.card = node((1,), "测试，10年以上，大专", actions=("AXPress",))
         return SimpleNamespace(

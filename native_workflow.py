@@ -8,7 +8,9 @@ import llm_utils
 from log_utils import logger
 from timing_utils import exponential_backoff, jitter
 from native_driver import (
-    NativeDailyLimitError, NativeDriverError, NativeNetworkError, NativeStaleElementError,
+    NativeDailyLimitError, NativeDriverError, NativeMarkLimitError, NativeMarkUnconfirmedError,
+    NativeNetworkError, NativeStaleElementError,
+    mark_limit_notice,
 )
 
 
@@ -50,9 +52,19 @@ def page_identity(nodes):
 class NativeSession:
     def __init__(self, driver):
         self.driver = driver
+        self.greeting_mark_limit_reached = False
+        self.recommend_mark_limit_reached = False
+        self.greeting_mark_result_unknown = False
+        self.recommend_mark_result_unknown = False
+        self._mark_limit_notice = None
 
     async def snapshot(self, *, allow_network_error=False):
         nodes = await self.driver.snapshot()
+        notice = mark_limit_notice(nodes)
+        if notice and notice != self._mark_limit_notice:
+            self._mark_limit_notice = notice
+            raise NativeMarkLimitError(f"BOSS 标记不合适额度已满：{notice}")
+        self._mark_limit_notice = notice
         # Inspect dedicated UI labels rather than candidate prose or chat history.
         for node in nodes:
             text = label(node)
@@ -613,6 +625,12 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
                 logger.warning("LLM 评估失败，跳过当前候选人")
             elif allow_contact and not mark_rejections:
                 logger.info("推荐候选人不符合要求；推荐不合适标记已暂停，返回列表")
+            elif allow_contact and getattr(session, "recommend_mark_limit_reached", False):
+                counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
+                logger.warning("BOSS 标记不合适额度已满，跳过当前候选人标记，继续推荐流程")
+            elif allow_contact and getattr(session, "recommend_mark_result_unknown", False):
+                counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
+                logger.warning("本轮推荐标记因先前结果未确认而暂停，跳过标记并继续推荐流程")
             elif allow_contact:
                 # 默认按模型结论自动标记；显式开启复核时逐人确认，未获确认的
                 # 结论保留待复核，不把允许联系当作自动淘汰授权。
@@ -653,15 +671,25 @@ async def loop_recommend(session, max_idx, requirements, client, stats, job_titl
                         # after a confirmed rejection instead of returning to list.
                         return is_resume(ns) and page_identity(ns) != assessed_page_now
 
-                    await mark_unsuitable(
-                        session, result.reason_category,
-                        verify_page=verify_resume, success_check=marked_or_left_detail,
-                        open_panel=open_detail_unsuitable_panel,
-                        map_reason=lambda ns: platform_reason_label(ns, result.reason_category),
-                        advance_check=advanced_to_next_resume,
-                    )
-                    counters["marked_unsuitable"] = counters.get("marked_unsuitable", 0) + 1
-                    logger.info("推荐候选人不符合要求，已标记不合适：职位=%s", job_title)
+                    try:
+                        await mark_unsuitable(
+                            session, result.reason_category,
+                            verify_page=verify_resume, success_check=marked_or_left_detail,
+                            open_panel=open_detail_unsuitable_panel,
+                            map_reason=lambda ns: platform_reason_label(ns, result.reason_category),
+                            advance_check=advanced_to_next_resume,
+                        )
+                    except NativeMarkLimitError as error:
+                        session.recommend_mark_limit_reached = True
+                        counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
+                        logger.warning("%s；当前候选人未标记，本轮跳过后续标记，继续推荐流程", error)
+                    except NativeMarkUnconfirmedError as error:
+                        session.recommend_mark_result_unknown = True
+                        counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
+                        logger.warning("%s；跳过当前标记，本轮暂停后续推荐标记，继续处理", error)
+                    else:
+                        counters["marked_unsuitable"] = counters.get("marked_unsuitable", 0) + 1
+                        logger.info("推荐候选人不符合要求，已标记不合适：职位=%s", job_title)
                 else:
                     counters["awaiting_review"] = counters.get("awaiting_review", 0) + 1
                     counters.setdefault("pending_rejections", []).append({

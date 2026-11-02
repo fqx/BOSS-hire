@@ -5,7 +5,10 @@ import re
 import job_utils
 import llm_utils
 from log_utils import logger
-from native_driver import NativeDriverError, NativeNetworkError
+from native_driver import (
+    NativeDriverError, NativeMarkLimitError, NativeMarkUnconfirmedError, NativeNetworkError,
+    mark_limit_notice,
+)
 
 
 GREETING_QUALIFIED_MSG = "您好，感谢您的主动联系！您的背景很符合我们的要求，麻烦发一份简历给我看看~"
@@ -244,7 +247,13 @@ async def mark_unsuitable(session, reason_category, expected_card_description=No
         raise NativeDriverError(f"无效的不合适原因：{reason_category}")
     from native_workflow import has_label, label
 
+    def check_mark_limit(ns):
+        notice = mark_limit_notice(ns)
+        if notice:
+            raise NativeMarkLimitError(f"BOSS 标记不合适额度已满：{notice}")
+
     def panel_open(ns):
+        check_mark_limit(ns)
         return any(has_label(ns, text) for text in UNSUITABLE_REASON_HEADERS)
 
     confirm_labels = ("确定", "确认", "确认不合适", "确定不合适")
@@ -316,6 +325,7 @@ async def mark_unsuitable(session, reason_category, expected_card_description=No
                    for n in ns)
 
     nodes = await session.snapshot()
+    check_mark_limit(nodes)
     verify_page(nodes)
     if marked(nodes):
         raise NativeDriverError("当前候选人已标记不合适，不重复提交")
@@ -356,7 +366,16 @@ async def mark_unsuitable(session, reason_category, expected_card_description=No
         return advance_check is not None and advance_check(ns)
 
     def submitted(ns):
+        check_mark_limit(ns)
         return success_check(ns) or advanced(ns)
+
+    async def wait_for_mark_result(predicate, description):
+        try:
+            return await session.wait(predicate, description)
+        except (TimeoutError, NativeNetworkError) as error:
+            raise NativeMarkUnconfirmedError(
+                f"标记不合适结果未确认（可能额度已满或网络异常），不重复提交：{error}"
+            ) from error
 
     def confirmation_ready(ns):
         # A preset reason can submit immediately in some client versions; the
@@ -367,12 +386,12 @@ async def mark_unsuitable(session, reason_category, expected_card_description=No
         verify_page(ns)
         return len(confirmations(ns)) == 1 and reason_context(ns, reason_label)
 
-    nodes = await session.wait(confirmation_ready, "不合适原因选择及确认按钮")
+    nodes = await wait_for_mark_result(confirmation_ready, "不合适原因选择及确认按钮")
     if submitted(nodes):
         return
     if custom_dialog_open(nodes):
         await submit_custom_reason(nodes)
-        await session.wait(submitted, "不合适标记成功（未确认时停止，不重试提交）")
+        await wait_for_mark_result(submitted, "不合适标记成功确认")
         return
     # Resolve the confirmation again rather than reusing a node from before a
     # transition; the candidate and selected reason must still match now.
@@ -383,13 +402,77 @@ async def mark_unsuitable(session, reason_category, expected_card_description=No
         raise NativeDriverError("无法确认当前不合适原因与提交按钮，停止提交")
     await session.driver.perform(confirms[0], "press")
 
-    await session.wait(submitted, "不合适标记成功（未确认时停止，不重试提交）")
+    await wait_for_mark_result(submitted, "不合适标记成功确认")
 
 
 def greeting_rows(nodes):
     """Recognize observed message rows; the target job exists only in chat."""
     return [n for n in nodes if n.role == "AXStaticText" and "AXPress" in n.actions
-            and n.description.count(",") >= 3 and " | " in n.description]
+            and n.description.count(",") >= 3
+            and re.fullmatch(r"(?:初中及以下|高中|中专/中技|大专|本科|硕士|博士)(?:\s*\|.*)?",
+                             n.description.rsplit(",", 1)[-1].strip())]
+
+
+EMPTY_GREETING_LABELS = ("暂无新招呼", "暂无消息", "暂无新消息", "暂时没有新招呼", "暂时还没有消息呢")
+
+
+def is_greetings_list(nodes):
+    from native_workflow import has_label
+    return (has_label(nodes, "新招呼") and has_label(nodes, "批量处理")
+            and not (has_label(nodes, "求简历") and has_label(nodes, "换电话/微信")))
+
+
+async def select_unread_greetings(session, nodes):
+    """Select unread conversations through a named entry or the message filter."""
+    from native_workflow import has_label, label
+
+    entries = [n for n in nodes if label(n) == "未读" and "AXPress" in n.actions]
+    if len(entries) == 1:
+        await session.driver.perform(entries[0], "press")
+        return await session.wait(is_greetings_list, "新招呼未读列表", allow_network_error=True)
+    if any(has_label(nodes, text) for text in EMPTY_GREETING_LABELS):
+        return nodes
+    filters = [n for n in nodes if n.role == "AXButton" and label(n) == "筛选"
+               and "AXPress" in n.actions]
+    if len(filters) != 1:
+        raise NativeDriverError("无法确认新招呼未读筛选：未读入口和唯一筛选按钮缺失")
+
+    def unread_options(ns):
+        return [n for n in ns if n.role == "AXButton" and "AXPress" in n.actions
+                and re.fullmatch(r"(?:\d+人，)?未读", label(n))]
+
+    await session.driver.perform(filters[0], "press")
+    nodes = await session.wait(
+        lambda ns: has_label(ns, "消息类型") and len(unread_options(ns)) == 1,
+        "新招呼消息类型筛选面板", allow_network_error=True,
+    )
+    # UIKit reports AXSelected=false for both choices, and pressing an already
+    # selected 未读 toggles it off. Reset this one section to 不限 first.
+    unlimited = [n for n in nodes if n.role == "AXButton" and "AXPress" in n.actions
+                 and re.fullmatch(r"(?:\d+人，)?不限", label(n))]
+    if len(unlimited) != 1:
+        raise NativeDriverError("新招呼消息类型不限选项必须唯一")
+    await session.driver.perform(unlimited[0], "press")
+    nodes = await session.wait(
+        lambda ns: has_label(ns, "消息类型") and len(unread_options(ns)) == 1,
+        "新招呼消息类型重置", allow_network_error=True,
+    )
+    await session.driver.perform(unread_options(nodes)[0], "press")
+    nodes = await session.wait(
+        lambda ns: has_label(ns, "消息类型") and len(unread_options(ns)) == 1,
+        "新招呼未读筛选选择", allow_network_error=True,
+    )
+    confirms = [n for n in nodes if n.role == "AXButton" and label(n) == "确定"
+                and "AXPress" in n.actions]
+    if len(confirms) != 1:
+        raise NativeDriverError("新招呼筛选确定按钮必须唯一")
+    await session.driver.perform(confirms[0], "press")
+    nodes = await session.wait(
+        lambda ns: is_greetings_list(ns) and not has_label(ns, "消息类型"),
+        "新招呼未读列表", allow_network_error=True,
+    )
+    logger.info("已通过消息类型筛选开启新招呼未读列表")
+    return nodes
 
 
 async def loop_greetings(session, job_configs, client, job_stats,
@@ -404,8 +487,7 @@ async def loop_greetings(session, job_configs, client, job_stats,
     def is_chat(ns):
         return has_label(ns, "求简历") and has_label(ns, "换电话/微信")
 
-    def is_greetings(ns):
-        return has_label(ns, "新招呼") and has_label(ns, "批量处理") and not is_chat(ns)
+    is_greetings = is_greetings_list
 
     async def navigate(ns, text, predicate, description):
         controls = [n for n in ns if label(n) == text and "AXPress" in n.actions]
@@ -428,15 +510,12 @@ async def loop_greetings(session, job_configs, client, job_stats,
             raise NativeDriverError("无法从当前客户端页面进入新招呼列表")
         nodes = await navigate(nodes, "消息", lambda ns: has_label(ns, "新招呼"), "消息页新招呼入口")
     nodes = await navigate(nodes, "新招呼", is_greetings, "新招呼列表")
-    if not has_label(nodes, "未读"):
-        logger.info("新招呼没有未读会话，结束本轮处理")
-        return 0
-    nodes = await navigate(nodes, "未读", is_greetings, "新招呼未读列表")
+    nodes = await select_unread_greetings(session, nodes)
 
     seen = set()
     processed = 0
     while len(seen) < max_candidates:
-        if any(has_label(nodes, text) for text in ("暂无新招呼", "暂无消息", "暂无新消息", "暂时没有新招呼")):
+        if any(has_label(nodes, text) for text in EMPTY_GREETING_LABELS):
             break
         rows = greeting_rows(nodes)
         row = next((r for r in rows if r.description not in seen), None)
@@ -498,6 +577,7 @@ async def loop_greetings(session, job_configs, client, job_stats,
         counters = job_stats.setdefault(config["job_title"], {})
         counters["inbound_viewed"] = counters.get("inbound_viewed", 0) + 1
         marked_now = False
+        mark_limited_now = False
         if result is None:
             logger.warning("新招呼 LLM 评估失败，跳过当前候选人")
         elif result.is_qualified:
@@ -510,6 +590,12 @@ async def loop_greetings(session, job_configs, client, job_stats,
                 counters["requested"] = counters.get("requested", 0) + 1
             else:
                 logger.info("新招呼候选人符合要求；只读模式，未发送消息")
+        elif allow_contact and getattr(session, "greeting_mark_limit_reached", False):
+            counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
+            logger.warning("BOSS 标记不合适额度已满，跳过当前候选人标记，继续处理新招呼")
+        elif allow_contact and getattr(session, "greeting_mark_result_unknown", False):
+            counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
+            logger.warning("本轮新招呼标记因先前结果未确认而暂停，跳过标记并继续处理")
         elif allow_contact:
             # 默认按模型结论自动标记；显式开启复核时逐人确认，未获确认的结论保留待复核。
             approved = True
@@ -528,13 +614,25 @@ async def loop_greetings(session, job_configs, client, job_stats,
                     # 已确认的提交引起，其他结果继续等待或停止。
                     return is_marked_unsuitable(ns) or is_greetings(ns)
 
-                await mark_unsuitable(
-                    session, result.reason_category,
-                    verify_page=verify_chat, success_check=marked_or_left_chat,
-                )
-                marked_now = True
-                counters["marked_unsuitable"] = counters.get("marked_unsuitable", 0) + 1
-                logger.info("新招呼候选人不符合要求，已标记不合适：%s", config["job_title"])
+                try:
+                    await mark_unsuitable(
+                        session, result.reason_category,
+                        verify_page=verify_chat, success_check=marked_or_left_chat,
+                    )
+                except NativeMarkLimitError as error:
+                    session.greeting_mark_limit_reached = True
+                    mark_limited_now = True
+                    counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
+                    logger.warning("%s；当前候选人未标记，本轮跳过后续标记，继续处理新招呼", error)
+                except NativeMarkUnconfirmedError as error:
+                    session.greeting_mark_result_unknown = True
+                    mark_limited_now = True
+                    counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
+                    logger.warning("%s；跳过当前标记，本轮暂停后续新招呼标记，继续处理", error)
+                else:
+                    marked_now = True
+                    counters["marked_unsuitable"] = counters.get("marked_unsuitable", 0) + 1
+                    logger.info("新招呼候选人不符合要求，已标记不合适：%s", config["job_title"])
             else:
                 counters["awaiting_review"] = counters.get("awaiting_review", 0) + 1
                 counters.setdefault("pending_rejections", []).append({
@@ -546,7 +644,7 @@ async def loop_greetings(session, job_configs, client, job_stats,
         else:
             logger.info("新招呼候选人不符合要求；只读模式，未标记不合适")
         processed += 1
-        if marked_now:
+        if marked_now or mark_limited_now:
             # Submission can land back on the greetings list; only then skip
             # the back action, which requires a chat page with a leading arrow.
             current = await session.snapshot(allow_network_error=True)

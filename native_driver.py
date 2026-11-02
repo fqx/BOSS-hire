@@ -34,6 +34,14 @@ class NativeDailyLimitError(NativeDriverError):
     """The client reached its daily view or communication limit."""
 
 
+class NativeMarkLimitError(NativeDriverError):
+    """The client explicitly rejected an unsuitable mark because of its quota."""
+
+
+class NativeMarkUnconfirmedError(NativeDriverError):
+    """A mark was attempted but its result could not be confirmed."""
+
+
 @dataclass(frozen=True)
 class AXNode:
     path: tuple[int, ...]
@@ -43,6 +51,18 @@ class AXNode:
     value: str
     rect: dict[str, float]
     actions: tuple[str, ...]
+
+
+def mark_limit_notice(nodes):
+    for node in nodes:
+        text = node.description or node.title or node.value
+        if node.role in ("AXStaticText", "AXButton") and re.fullmatch(
+            r"(?:您)?(?:今日|今天|当日|当天)?(?:的)?标记(?:不合适|不符合|不合格)"
+            r"(?:人数|次数|数量|数|的牛人数)?已(?:达(?:到)?|超过)(?:今日|每日)?上限(?:[，,。！!].*)?",
+            text,
+        ):
+            return text
+    return None
 
 
 class NativeDriver:

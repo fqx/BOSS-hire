@@ -48,6 +48,10 @@ def log_final_stats():
             parts.append(f"打开沟通数 {stats['contact_opened']}")
         if 'marked_unsuitable' in stats:
             parts.append(f"标记不合适数 {stats['marked_unsuitable']}")
+        if 'mark_limit_skipped' in stats:
+            parts.append(f"标记额度已满跳过数 {stats['mark_limit_skipped']}")
+        if 'mark_unconfirmed_skipped' in stats:
+            parts.append(f"标记结果未确认跳过数 {stats['mark_unconfirmed_skipped']}")
         if 'awaiting_review' in stats:
             parts.append(f"待人工复核数 {stats['awaiting_review']}")
         log_utils.logger.llm(f"职位 {job_title}：{'，'.join(parts)}")
