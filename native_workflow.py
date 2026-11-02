@@ -71,10 +71,44 @@ class NativeSession:
             if not allow_network_error and node.role == "AXButton" and text.startswith("网络连接失败"):
                 raise NativeNetworkError("BOSS 网络连接失败，请先恢复客户端网络")
             if text == "购买聊天加油包" or text.startswith("该职位今日查看数已达上限"):
+                if has_label(nodes, "购买聊天加油包"):
+                    try:
+                        await self.close_daily_limit_purchase(nodes)
+                    except (NativeDriverError, TimeoutError) as error:
+                        raise NativeDailyLimitError(
+                            f"BOSS 今日查看/沟通额度已达上限；关闭购买页失败：{error}"
+                        ) from error
                 raise NativeDailyLimitError("BOSS 今日查看/沟通额度已达上限，请停止并稍后重试")
             if text in ("安全验证", "人脸验证", "身份验证", "账号异常", "登录/注册", "验证码登录"):
                 raise NativeDriverError(f"BOSS 需要人工处理：{text}")
         return nodes
+
+    async def close_daily_limit_purchase(self, nodes):
+        titles = [n for n in nodes if label(n) == "购买聊天加油包"]
+        if len(titles) != 1:
+            raise NativeDriverError("购买页标题必须唯一，无法确认关闭按钮")
+        title = titles[0]
+        closes = [n for n in nodes if n.role == "AXButton" and "AXPress" in n.actions
+                  and label(n) in ("", "关闭", "返回") and n.path[:-1] == title.path[:-1]
+                  and 20 < n.rect["height"] < 60 and 0 < n.rect["width"] < 100
+                  and n.rect["x"] + n.rect["width"] < title.rect["x"]
+                  and n.rect["y"] < title.rect["y"] + title.rect["height"]
+                  and n.rect["y"] + n.rect["height"] > title.rect["y"]]
+        if len(closes) != 1:
+            raise NativeDriverError("无法唯一定位购买页关闭按钮")
+        await self.driver.perform(closes[0], "press")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            # Read directly: the purchase page may remain visible during its
+            # dismissal animation and must not trigger recursive limit handling.
+            current = await self.driver.snapshot()
+            if (not has_label(current, "购买聊天加油包") and not has_label(current, "立即购买")
+                    and (is_candidate_list(current) or is_resume(current)
+                         or has_label(current, "求简历") or has_label(current, "消息"))):
+                logger.info("每日查看/沟通额度已满，已关闭聊天加油包购买页")
+                return
+            await asyncio.sleep(jitter(0.2))
+        raise TimeoutError("关闭购买页后未确认返回客户端原页面")
 
     async def wait(self, predicate, description, timeout=15, stable_for=0.5, *, allow_network_error=False):
         deadline = time.monotonic() + timeout

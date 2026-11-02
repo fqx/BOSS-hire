@@ -266,6 +266,30 @@ class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(native_workflow.NativeDailyLimitError, "上限"):
                     await session.snapshot(allow_network_error=True)
 
+    async def test_daily_limit_closes_purchase_page_before_stopping(self):
+        window = replace(node((), role="AXWindow"), rect={"x": 0, "y": 0, "width": 788, "height": 1083})
+        title = replace(node((0, 1), "购买聊天加油包"), rect={"x": 350, "y": 55, "width": 100, "height": 20})
+        close = replace(node((0, 0), role="AXButton", actions=("AXPress",)),
+                        rect={"x": 130, "y": 45, "width": 30, "height": 34})
+        buy = replace(node((0, 2), "立即购买", role="AXButton", actions=("AXPress",)),
+                      rect={"x": 570, "y": 1000, "width": 100, "height": 34})
+        purchase = [window, close, title, buy]
+        candidates = [node((0,), "牛人"), node((1,), "推荐")]
+        driver = SimpleNamespace(snapshot=AsyncMock(side_effect=[purchase, purchase, candidates]), perform=AsyncMock())
+        session = native_workflow.NativeSession(driver)
+        with self.assertRaisesRegex(native_workflow.NativeDailyLimitError, "上限"):
+            await session.snapshot()
+        driver.perform.assert_awaited_once_with(close, "press")
+        self.assertEqual(driver.snapshot.await_count, 3)
+
+    async def test_daily_limit_with_no_unique_close_never_presses_purchase(self):
+        title = node((0, 1), "购买聊天加油包")
+        buy = node((0, 2), "立即购买", role="AXButton", actions=("AXPress",))
+        driver = SimpleNamespace(snapshot=AsyncMock(return_value=[title, buy]), perform=AsyncMock())
+        with self.assertRaisesRegex(native_workflow.NativeDailyLimitError, "关闭"):
+            await native_workflow.NativeSession(driver).snapshot()
+        driver.perform.assert_not_awaited()
+
     async def test_wait_retries_transient_network_banner_then_succeeds(self):
         banner = node((0,), "网络连接失败，请检查网络", "AXButton")
         target = node((1,), "目标")
