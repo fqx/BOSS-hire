@@ -1,4 +1,5 @@
 import logging, os
+from contextlib import contextmanager
 from tqdm import tqdm
 from dotenv import load_dotenv
 load_dotenv()
@@ -75,3 +76,15 @@ file_handler.setLevel(logging.WARNING)
 file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
+
+
+@contextmanager
+def console_progress(**kwargs):
+    """Keep console logs above the progress bar and release it on every exit."""
+    previous = tqdm_handler._tqdm_instance
+    with tqdm(**kwargs) as progress:
+        tqdm_handler.set_tqdm(progress)
+        try:
+            yield progress
+        finally:
+            tqdm_handler.set_tqdm(previous)

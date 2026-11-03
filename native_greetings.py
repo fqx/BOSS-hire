@@ -4,7 +4,7 @@ import re
 
 import job_utils
 import llm_utils
-from log_utils import logger
+from log_utils import console_progress, logger
 from native_driver import (
     NativeDriverError, NativeMarkLimitError, NativeMarkUnconfirmedError, NativeNetworkError,
     mark_limit_notice,
@@ -514,142 +514,145 @@ async def loop_greetings(session, job_configs, client, job_stats,
 
     seen = set()
     processed = 0
-    while len(seen) < max_candidates:
-        if any(has_label(nodes, text) for text in EMPTY_GREETING_LABELS):
-            break
-        rows = greeting_rows(nodes)
-        row = next((r for r in rows if r.description not in seen), None)
-        if row is None:
-            scrolls = [n for n in nodes if n.role == "AXGroup" and "AXScrollDownByPage" in n.actions]
-            if not rows and not scrolls:
-                raise NativeDriverError("新招呼列表未提供已验证的候选人行，停止处理")
-            if not scrolls:
+    with console_progress(desc="新招呼", unit="人", leave=True,
+                          dynamic_ncols=True) as progress:
+        while len(seen) < max_candidates:
+            if any(has_label(nodes, text) for text in EMPTY_GREETING_LABELS):
                 break
-            before = tuple((r.description, round(r.rect["y"], 1)) for r in rows)
-            await session.driver.perform(scrolls[0], "scrollDown")
-            nodes = await session.wait(is_greetings, "新招呼翻页", stable_for=1, allow_network_error=True)
-            if tuple((r.description, round(r.rect["y"], 1)) for r in greeting_rows(nodes)) == before:
-                if not rows:
-                    raise NativeDriverError("无法识别新招呼候选人行，停止处理")
-                break
-            continue
-        seen.add(row.description)
-        await session.driver.perform(row, "press")
-        chat_nodes = await session.wait(is_chat, "新招呼会话")
-        actual_title, card = chat_position(chat_nodes)
-        config = match_greeting_job(actual_title, job_configs)
-        if config is None:
-            logger.info("跳过未配置的新招呼职位：%s", actual_title)
-            nodes = await session.back(is_greetings, "跳过后返回新招呼列表", allow_network_error=True)
-            continue
-        requirements = job_utils.get_job_requirements(config.get("job_requirements", {}))
-        candidate_label = row.description.split(",", 1)[0]
-        # 会话里的卡片只是详情入口；先打开完整简历，不能拿卡片摘要代替评估材料。
-        logger.info("新招呼[%s / %s]：打开详细简历", actual_title, candidate_label)
-        await session.driver.perform(card, "press")
-        try:
-            text = await session.read_resume()
-        except TimeoutError:
-            await session.back(is_chat, "超时后关闭在线简历")
-            await session.back(is_greetings, "超时后返回新招呼列表", allow_network_error=True)
-            nodes = await session.snapshot(allow_network_error=True)
-            logger.warning("新招呼简历加载超时，已返回列表")
-            continue
-        except NativeNetworkError:
-            # Same safe recovery as a timeout: prove the chat and greetings
-            # list are back, then skip this candidate without retrying the read.
-            await session.back(is_chat, "网络横幅后关闭在线简历", allow_network_error=True)
-            nodes = await session.back(is_greetings, "网络横幅后返回新招呼列表",
-                                       allow_network_error=True)
-            logger.warning("新招呼简历读取遇到网络横幅，已确认返回列表，跳过当前候选人")
-            continue
-        logger.info("新招呼[%s / %s]：详细简历读取完成，共 %s 字", actual_title, candidate_label, len(text))
-        assessed_page = page_identity(await session.snapshot()) if allow_contact else None
-        result = await asyncio.to_thread(
-            llm_utils.is_qualified_text_result, client, text, requirements["cv_requirements"]
-        )
-        if allow_contact:
-            current = await session.snapshot()
-            if not is_resume(current) or page_identity(current) != assessed_page:
-                raise NativeDriverError("评估期间新招呼简历或候选人发生变化，停止处理")
-        await session.back(is_chat, "关闭新招呼在线简历")
-        logger.info("新招呼[%s / %s]：关闭详情，已返回会话", actual_title, candidate_label)
-        counters = job_stats.setdefault(config["job_title"], {})
-        counters["inbound_viewed"] = counters.get("inbound_viewed", 0) + 1
-        marked_now = False
-        mark_limited_now = False
-        if result is None:
-            logger.warning("新招呼 LLM 评估失败，跳过当前候选人")
-        elif result.is_qualified:
-            counters["inbound_qualified"] = counters.get("inbound_qualified", 0) + 1
-            if allow_contact:
-                current_title, current_card = chat_position(await session.snapshot())
-                if current_title != actual_title or current_card.description != card.description:
-                    raise NativeDriverError("当前会话不是已评估的新招呼候选人，停止发送")
-                await send_saved_greeting(session)
-                counters["requested"] = counters.get("requested", 0) + 1
-            else:
-                logger.info("新招呼候选人符合要求；只读模式，未发送消息")
-        elif allow_contact and getattr(session, "greeting_mark_limit_reached", False):
-            counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
-            logger.warning("BOSS 标记不合适额度已满，跳过当前候选人标记，继续处理新招呼")
-        elif allow_contact and getattr(session, "greeting_mark_result_unknown", False):
-            counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
-            logger.warning("本轮新招呼标记因先前结果未确认而暂停，跳过标记并继续处理")
-        elif allow_contact:
-            # 默认按模型结论自动标记；显式开启复核时逐人确认，未获确认的结论保留待复核。
-            approved = True
-            if rejection_reviewer is not None:
-                approved = await rejection_reviewer(config["job_title"], result)
-            if approved is True:
-                def verify_chat(ns):
-                    if is_marked_unsuitable(ns):
-                        return
-                    _, current_card = chat_position(ns)
-                    if current_card.description != card.description:
-                        raise NativeDriverError("不合适操作期间会话候选人发生变化，停止提交")
-
-                def marked_or_left_chat(ns):
-                    # 客户端提交后可能直接回到新招呼列表；两种状态都只由本次
-                    # 已确认的提交引起，其他结果继续等待或停止。
-                    return is_marked_unsuitable(ns) or is_greetings(ns)
-
-                try:
-                    await mark_unsuitable(
-                        session, result.reason_category,
-                        verify_page=verify_chat, success_check=marked_or_left_chat,
-                    )
-                except NativeMarkLimitError as error:
-                    session.greeting_mark_limit_reached = True
-                    mark_limited_now = True
-                    counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
-                    logger.warning("%s；当前候选人未标记，本轮跳过后续标记，继续处理新招呼", error)
-                except NativeMarkUnconfirmedError as error:
-                    session.greeting_mark_result_unknown = True
-                    mark_limited_now = True
-                    counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
-                    logger.warning("%s；跳过当前标记，本轮暂停后续新招呼标记，继续处理", error)
-                else:
-                    marked_now = True
-                    counters["marked_unsuitable"] = counters.get("marked_unsuitable", 0) + 1
-                    logger.info("新招呼候选人不符合要求，已标记不合适：%s", config["job_title"])
-            else:
-                counters["awaiting_review"] = counters.get("awaiting_review", 0) + 1
-                counters.setdefault("pending_rejections", []).append({
-                    "reason": result.reason,
-                    "reason_category": result.reason_category,
-                    "expected_card_description": card.description,
-                })
-                logger.info("新招呼淘汰结论待人工复核，未标记不合适：%s", config["job_title"])
-        else:
-            logger.info("新招呼候选人不符合要求；只读模式，未标记不合适")
-        processed += 1
-        if marked_now or mark_limited_now:
-            # Submission can land back on the greetings list; only then skip
-            # the back action, which requires a chat page with a leading arrow.
-            current = await session.snapshot(allow_network_error=True)
-            if is_greetings(current):
-                nodes = current
+            rows = greeting_rows(nodes)
+            row = next((r for r in rows if r.description not in seen), None)
+            if row is None:
+                scrolls = [n for n in nodes if n.role == "AXGroup" and "AXScrollDownByPage" in n.actions]
+                if not rows and not scrolls:
+                    raise NativeDriverError("新招呼列表未提供已验证的候选人行，停止处理")
+                if not scrolls:
+                    break
+                before = tuple((r.description, round(r.rect["y"], 1)) for r in rows)
+                await session.driver.perform(scrolls[0], "scrollDown")
+                nodes = await session.wait(is_greetings, "新招呼翻页", stable_for=1, allow_network_error=True)
+                if tuple((r.description, round(r.rect["y"], 1)) for r in greeting_rows(nodes)) == before:
+                    if not rows:
+                        raise NativeDriverError("无法识别新招呼候选人行，停止处理")
+                    break
                 continue
-        nodes = await session.back(is_greetings, "返回新招呼列表", allow_network_error=True)
+            seen.add(row.description)
+            await session.driver.perform(row, "press")
+            chat_nodes = await session.wait(is_chat, "新招呼会话")
+            progress.update(1)
+            actual_title, card = chat_position(chat_nodes)
+            config = match_greeting_job(actual_title, job_configs)
+            if config is None:
+                logger.info("跳过未配置的新招呼职位：%s", actual_title)
+                nodes = await session.back(is_greetings, "跳过后返回新招呼列表", allow_network_error=True)
+                continue
+            requirements = job_utils.get_job_requirements(config.get("job_requirements", {}))
+            candidate_label = row.description.split(",", 1)[0]
+            # 会话里的卡片只是详情入口；先打开完整简历，不能拿卡片摘要代替评估材料。
+            logger.info("新招呼[%s / %s]：打开详细简历", actual_title, candidate_label)
+            await session.driver.perform(card, "press")
+            try:
+                text = await session.read_resume()
+            except TimeoutError:
+                await session.back(is_chat, "超时后关闭在线简历")
+                await session.back(is_greetings, "超时后返回新招呼列表", allow_network_error=True)
+                nodes = await session.snapshot(allow_network_error=True)
+                logger.warning("新招呼简历加载超时，已返回列表")
+                continue
+            except NativeNetworkError:
+                # Same safe recovery as a timeout: prove the chat and greetings
+                # list are back, then skip this candidate without retrying the read.
+                await session.back(is_chat, "网络横幅后关闭在线简历", allow_network_error=True)
+                nodes = await session.back(is_greetings, "网络横幅后返回新招呼列表",
+                                           allow_network_error=True)
+                logger.warning("新招呼简历读取遇到网络横幅，已确认返回列表，跳过当前候选人")
+                continue
+            logger.info("新招呼[%s / %s]：详细简历读取完成，共 %s 字", actual_title, candidate_label, len(text))
+            assessed_page = page_identity(await session.snapshot()) if allow_contact else None
+            result = await asyncio.to_thread(
+                llm_utils.is_qualified_text_result, client, text, requirements["cv_requirements"]
+            )
+            if allow_contact:
+                current = await session.snapshot()
+                if not is_resume(current) or page_identity(current) != assessed_page:
+                    raise NativeDriverError("评估期间新招呼简历或候选人发生变化，停止处理")
+            await session.back(is_chat, "关闭新招呼在线简历")
+            logger.info("新招呼[%s / %s]：关闭详情，已返回会话", actual_title, candidate_label)
+            counters = job_stats.setdefault(config["job_title"], {})
+            counters["inbound_viewed"] = counters.get("inbound_viewed", 0) + 1
+            marked_now = False
+            mark_limited_now = False
+            if result is None:
+                logger.warning("新招呼 LLM 评估失败，跳过当前候选人")
+            elif result.is_qualified:
+                counters["inbound_qualified"] = counters.get("inbound_qualified", 0) + 1
+                if allow_contact:
+                    current_title, current_card = chat_position(await session.snapshot())
+                    if current_title != actual_title or current_card.description != card.description:
+                        raise NativeDriverError("当前会话不是已评估的新招呼候选人，停止发送")
+                    await send_saved_greeting(session)
+                    counters["requested"] = counters.get("requested", 0) + 1
+                else:
+                    logger.info("新招呼候选人符合要求；只读模式，未发送消息")
+            elif allow_contact and getattr(session, "greeting_mark_limit_reached", False):
+                counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
+                logger.warning("BOSS 标记不合适额度已满，跳过当前候选人标记，继续处理新招呼")
+            elif allow_contact and getattr(session, "greeting_mark_result_unknown", False):
+                counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
+                logger.warning("本轮新招呼标记因先前结果未确认而暂停，跳过标记并继续处理")
+            elif allow_contact:
+                # 默认按模型结论自动标记；显式开启复核时逐人确认，未获确认的结论保留待复核。
+                approved = True
+                if rejection_reviewer is not None:
+                    approved = await rejection_reviewer(config["job_title"], result)
+                if approved is True:
+                    def verify_chat(ns):
+                        if is_marked_unsuitable(ns):
+                            return
+                        _, current_card = chat_position(ns)
+                        if current_card.description != card.description:
+                            raise NativeDriverError("不合适操作期间会话候选人发生变化，停止提交")
+
+                    def marked_or_left_chat(ns):
+                        # 客户端提交后可能直接回到新招呼列表；两种状态都只由本次
+                        # 已确认的提交引起，其他结果继续等待或停止。
+                        return is_marked_unsuitable(ns) or is_greetings(ns)
+
+                    try:
+                        await mark_unsuitable(
+                            session, result.reason_category,
+                            verify_page=verify_chat, success_check=marked_or_left_chat,
+                        )
+                    except NativeMarkLimitError as error:
+                        session.greeting_mark_limit_reached = True
+                        mark_limited_now = True
+                        counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
+                        logger.warning("%s；当前候选人未标记，本轮跳过后续标记，继续处理新招呼", error)
+                    except NativeMarkUnconfirmedError as error:
+                        session.greeting_mark_result_unknown = True
+                        mark_limited_now = True
+                        counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
+                        logger.warning("%s；跳过当前标记，本轮暂停后续新招呼标记，继续处理", error)
+                    else:
+                        marked_now = True
+                        counters["marked_unsuitable"] = counters.get("marked_unsuitable", 0) + 1
+                        logger.info("新招呼候选人不符合要求，已标记不合适：%s", config["job_title"])
+                else:
+                    counters["awaiting_review"] = counters.get("awaiting_review", 0) + 1
+                    counters.setdefault("pending_rejections", []).append({
+                        "reason": result.reason,
+                        "reason_category": result.reason_category,
+                        "expected_card_description": card.description,
+                    })
+                    logger.info("新招呼淘汰结论待人工复核，未标记不合适：%s", config["job_title"])
+            else:
+                logger.info("新招呼候选人不符合要求；只读模式，未标记不合适")
+            processed += 1
+            if marked_now or mark_limited_now:
+                # Submission can land back on the greetings list; only then skip
+                # the back action, which requires a chat page with a leading arrow.
+                current = await session.snapshot(allow_network_error=True)
+                if is_greetings(current):
+                    nodes = current
+                    continue
+            nodes = await session.back(is_greetings, "返回新招呼列表", allow_network_error=True)
     return processed

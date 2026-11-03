@@ -73,6 +73,13 @@ class NativeResumeParsingTests(unittest.TestCase):
         )
         self.assertIsNone(parsed["salary_lower_bound"])
 
+    def test_internship_salary_cannot_supply_hidden_expectation(self):
+        parsed = native_workflow.parse_native_resume(
+            "22岁 大专\n求职期望\n销售专员，广州\n实习经历\n实习薪资3000-5000元"
+        )
+        self.assertIsNone(parsed["salary_lower_bound"])
+        self.assertIsNone(parsed["salary_upper_bound"])
+
     def test_missing_expectation_does_not_extract_salary_from_prose(self):
         parsed = native_workflow.parse_native_resume("32岁 大专\n个人优势：期望业绩达到5000-7000元\n工作经历")
         self.assertIsNone(parsed["salary_lower_bound"])
@@ -113,6 +120,28 @@ class NativeResumeParsingTests(unittest.TestCase):
 
 
 class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_internship_resume_reads_to_bottom_and_restores_top(self):
+        scroll = node((0,), role="AXGroup", actions=("AXScrollUpByPage", "AXScrollDownByPage"))
+        contact = node((9,), "立即沟通", "AXButton", ("AXPress",))
+        # The live graduate resume virtualizes education below internship cells.
+        top = [scroll, node((1,), "某同学"), node((2,), "离校-随时到岗, 大专"),
+               node((3,), "求职期望"), node((4,), "行业不限, 3000-7000元"),
+               node((5,), "实习经历"), node((6,), "实习销售内容"), contact]
+        bottom_scroll = replace(scroll, actions=("AXScrollUpByPage",))
+        bottom = [bottom_scroll, node((7,), "教育经历"), node((8,), "某学校"), contact]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.wait = AsyncMock(side_effect=[top, top, bottom, top, top])
+
+        text = await session.read_resume()
+
+        self.assertIn("实习销售内容", text)
+        self.assertIn("某学校", text)
+        self.assertEqual(session.driver.perform.await_args_list, [
+            call(scroll, "scrollUp"), call(scroll, "scrollDown"),
+            call(bottom_scroll, "scrollUp"), call(scroll, "scrollUp"),
+        ])
+        self.assertTrue(native_workflow.is_resume(top[:-1]))
+
     async def test_mark_quota_is_identified_before_network_banner_and_allows_navigation_afterwards(self):
         nodes = [node((0,), "网络连接失败，请检查网络", "AXButton"),
                  node((1,), "标记不合格数已达到上限")]
@@ -275,12 +304,13 @@ class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
                       rect={"x": 570, "y": 1000, "width": 100, "height": 34})
         purchase = [window, close, title, buy]
         candidates = [node((0,), "牛人"), node((1,), "推荐")]
-        driver = SimpleNamespace(snapshot=AsyncMock(side_effect=[purchase, purchase, candidates]), perform=AsyncMock())
+        driver = SimpleNamespace(perform=AsyncMock())
+        driver.snapshot = AsyncMock(side_effect=lambda: candidates if driver.perform.await_count else purchase)
         session = native_workflow.NativeSession(driver)
         with self.assertRaisesRegex(native_workflow.NativeDailyLimitError, "上限"):
             await session.snapshot()
         driver.perform.assert_awaited_once_with(close, "press")
-        self.assertEqual(driver.snapshot.await_count, 3)
+        self.assertGreaterEqual(driver.snapshot.await_count, 3)
 
     async def test_daily_limit_with_no_unique_close_never_presses_purchase(self):
         title = node((0, 1), "购买聊天加油包")
@@ -289,6 +319,41 @@ class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(native_workflow.NativeDailyLimitError, "关闭"):
             await native_workflow.NativeSession(driver).snapshot()
         driver.perform.assert_not_awaited()
+
+    async def test_daily_limit_waits_for_purchase_close_to_finish_loading(self):
+        title = replace(node((0, 1), "购买聊天加油包"),
+                        rect={"x": 350, "y": 55, "width": 100, "height": 20})
+        close = replace(node((0, 0), role="AXButton", actions=("AXPress",)),
+                        rect={"x": 130, "y": 45, "width": 30, "height": 34})
+        buy = node((0, 2), "立即购买", role="AXButton", actions=("AXPress",))
+        loading = [title, buy]
+        purchase = [close, title, buy]
+        candidates = [node((0,), "牛人"), node((1,), "推荐")]
+        driver = SimpleNamespace(perform=AsyncMock())
+        invalid_close = replace(close, rect={"x": 0, "y": 0, "width": 0, "height": 0})
+        duplicate_close = replace(close, path=(0, 3))
+        snapshots = iter([loading, [invalid_close, title, buy],
+                          [close, duplicate_close, title, buy]])
+        driver.snapshot = AsyncMock(side_effect=lambda: (
+            candidates if driver.perform.await_count else next(snapshots, purchase)
+        ))
+
+        with self.assertRaisesRegex(native_workflow.NativeDailyLimitError, "上限"):
+            await native_workflow.NativeSession(driver).snapshot()
+
+        driver.perform.assert_awaited_once_with(close, "press")
+        self.assertGreater(driver.snapshot.await_count, 3)
+
+    async def test_daily_limit_close_action_failure_is_not_retried(self):
+        title = replace(node((0, 1), "购买聊天加油包"),
+                        rect={"x": 350, "y": 55, "width": 100, "height": 20})
+        close = replace(node((0, 0), role="AXButton", actions=("AXPress",)),
+                        rect={"x": 130, "y": 45, "width": 30, "height": 34})
+        driver = SimpleNamespace(snapshot=AsyncMock(return_value=[close, title]),
+                                 perform=AsyncMock(side_effect=NativeDriverError("close failed")))
+        with self.assertRaisesRegex(native_workflow.NativeDailyLimitError, "close failed"):
+            await native_workflow.NativeSession(driver).snapshot()
+        driver.perform.assert_awaited_once_with(close, "press")
 
     async def test_wait_retries_transient_network_banner_then_succeeds(self):
         banner = node((0,), "网络连接失败，请检查网络", "AXButton")
