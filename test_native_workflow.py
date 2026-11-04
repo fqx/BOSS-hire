@@ -224,6 +224,141 @@ class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(NativeDriverError, "cannot expand"):
             await session.read_resume()
 
+    async def test_expansion_scrolls_offscreen_and_edge_controls_before_press(self):
+        for y in (700, 590, -20):
+            with self.subTest(y=y):
+                window = replace(node((), role="AXWindow"),
+                                 rect={"x": 0, "y": 0, "width": 500, "height": 600})
+                scroll = replace(node((0,), role="AXGroup", actions=("AXScrollDownByPage", "AXScrollUpByPage")),
+                                 rect={"x": 0, "y": 80, "width": 500, "height": 480})
+                expand = node((0, 3), "展开全部工作经历", actions=("AXPress",), y=y)
+                visible = replace(expand, path=(0, 4), rect={**expand.rect, "y": 300})
+                base = [window, node((1,), "求职期望"), node((2,), "工作经历")]
+                initial = base + [scroll, expand]
+                positioned = base + [scroll, visible]
+                expanded = base + [node((4,), "完整工作内容")]
+                driver = SimpleNamespace(perform=AsyncMock())
+                session = native_workflow.NativeSession(driver)
+                session.wait = AsyncMock(side_effect=[initial, initial, positioned, expanded, expanded])
+                text = await session.read_resume()
+                self.assertIn("完整工作内容", text)
+                direction = "AXScrollUpByPage" if y < 80 else "AXScrollDownByPage"
+                self.assertEqual(driver.perform.await_args_list[:3],
+                                 [call(scroll, "scrollUp"), call(scroll, direction), call(visible, "press")])
+
+    async def test_expansion_uses_scroll_to_visible_and_refreshes_target(self):
+        window = replace(node((), role="AXWindow"),
+                         rect={"x": 0, "y": 0, "width": 500, "height": 600})
+        expand = node((3,), "展开全部工作经历", actions=("AXPress", "AXScrollToVisible"), y=700)
+        visible = replace(expand, path=(4,), rect={**expand.rect, "y": 300})
+        base = [window, node((1,), "求职期望"), node((2,), "工作经历")]
+        driver = SimpleNamespace(perform=AsyncMock())
+        session = native_workflow.NativeSession(driver)
+        session.wait = AsyncMock(side_effect=[base + [expand], base + [visible], base, base])
+        await session.read_resume()
+        self.assertEqual(driver.perform.await_args_list,
+                         [call(expand, "scrollToVisible"), call(visible, "press")])
+
+    async def test_scroll_to_visible_accepts_control_flush_with_window_edge(self):
+        window = replace(node((), role="AXWindow"),
+                         rect={"x": 0, "y": 0, "width": 500, "height": 600})
+        expand = node((3,), "展开全部工作经历", actions=("AXPress", "AXScrollToVisible"), y=700)
+        visible = replace(expand, rect={**expand.rect, "y": 570})
+        base = [window, node((1,), "求职期望"), node((2,), "工作经历")]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.wait = AsyncMock(side_effect=[base + [expand], base + [visible], base])
+        await session.read_resume()
+        self.assertEqual(session.driver.perform.await_args_list,
+                         [call(expand, "scrollToVisible"), call(visible, "press")])
+
+    async def test_page_scroll_accepts_visible_center_without_bouncing_between_edges(self):
+        window = replace(node((), role="AXWindow"),
+                         rect={"x": 0, "y": 0, "width": 500, "height": 600})
+        scroll = replace(node((0,), role="AXGroup", actions=("AXScrollUpByPage", "AXScrollDownByPage")),
+                         rect={"x": 0, "y": 80, "width": 500, "height": 480})
+        expand = node((0, 3), "展开全部工作经历", actions=("AXPress",), y=550)
+        visible = replace(expand, rect={**expand.rect, "y": 70})
+        base = [window, node((1,), "求职期望"), node((2,), "工作经历")]
+        initial = base + [scroll, expand]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.wait = AsyncMock(side_effect=[initial, initial, base + [scroll, visible], base])
+        await session.read_resume()
+        self.assertEqual(session.driver.perform.await_args_list,
+                         [call(scroll, "scrollUp"), call(scroll, "AXScrollDownByPage"), call(visible, "press")])
+
+    async def test_positioning_for_expansion_preserves_earlier_resume_cells(self):
+        window = replace(node((), role="AXWindow"),
+                         rect={"x": 0, "y": 0, "width": 500, "height": 600})
+        expand = node((0, 3), "展开全部工作经历", actions=("AXPress", "AXScrollToVisible"), y=700)
+        visible = replace(expand, rect={**expand.rect, "y": 300})
+        up = replace(node((0,), role="AXGroup", actions=("AXScrollUpByPage",)),
+                     rect={"x": 0, "y": 80, "width": 500, "height": 480})
+        base = [window, node((1,), "求职期望"), node((2,), "工作经历")]
+        initial = base + [node((4,), "顶部甲公司"), expand]
+        positioned = base + [up, visible]
+        expanded = base + [up, node((5,), "底部乙公司")]
+        restored = base + [node((4,), "顶部甲公司"), node((5,), "底部乙公司")]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.wait = AsyncMock(side_effect=[initial, positioned, expanded, restored])
+        text = await session.read_resume()
+        self.assertIn("顶部甲公司", text)
+        self.assertIn("底部乙公司", text)
+        self.assertEqual(session.driver.perform.await_args_list,
+                         [call(expand, "scrollToVisible"), call(visible, "press"), call(up, "scrollUp")])
+
+    async def test_expansion_wait_requires_clicked_control_to_disappear(self):
+        expand = node((3,), "展开全部工作经历", actions=("AXPress",))
+        base = [node((1,), "求职期望"), node((2,), "工作经历")]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.wait = AsyncMock(side_effect=[base + [expand], base])
+        await session.read_resume()
+        confirmation = session.wait.await_args_list[1].args[0]
+        self.assertFalse(confirmation(base + [expand]))
+        self.assertTrue(confirmation(base))
+
+    async def test_eighth_expansion_success_is_accepted(self):
+        base = [node((1,), "求职期望"), node((2,), "工作经历")]
+        pages = [base + [node((3,), "展开全部工作经历", actions=("AXPress",))]]
+        for i in range(7):
+            pages.append(base + [node((4 + i,), "展开全部项目经历" if i % 2 == 0 else "展开全部工作经历",
+                                      actions=("AXPress",))])
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.wait = AsyncMock(side_effect=pages + [base])
+        await session.read_resume()
+        self.assertEqual(session.driver.perform.await_count, 8)
+
+    async def test_expansion_retries_after_confirmation_timeout_with_fresh_node(self):
+        expand = node((3,), "展开全部工作经历", actions=("AXPress",))
+        fresh = replace(expand, path=(4,))
+        base = [node((1,), "求职期望"), node((2,), "工作经历")]
+        driver = SimpleNamespace(perform=AsyncMock())
+        session = native_workflow.NativeSession(driver)
+        session.wait = AsyncMock(side_effect=[base + [expand], TimeoutError(), base])
+        session.snapshot = AsyncMock(return_value=base + [fresh])
+        await session.read_resume()
+        self.assertEqual(driver.perform.await_args_list, [call(expand, "press"), call(fresh, "press")])
+
+    async def test_expansion_stops_after_eight_unconfirmed_presses(self):
+        expand = node((3,), "展开全部工作经历", actions=("AXPress",))
+        nodes = [node((1,), "求职期望"), node((2,), "工作经历"), expand]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.wait = AsyncMock(side_effect=[nodes] + [TimeoutError()] * 8)
+        session.snapshot = AsyncMock(return_value=nodes)
+        with self.assertRaisesRegex(NativeDriverError, "经历展开后仍未消失"):
+            await session.read_resume()
+        self.assertEqual(session.driver.perform.await_count, 8)
+
+    async def test_offscreen_expansion_is_never_pressed_when_scrolling_does_not_move_it(self):
+        window = replace(node((), role="AXWindow"),
+                         rect={"x": 0, "y": 0, "width": 500, "height": 600})
+        expand = node((3,), "展开全部工作经历", actions=("AXPress", "AXScrollToVisible"), y=700)
+        nodes = [window, node((1,), "求职期望"), node((2,), "工作经历"), expand]
+        session = native_workflow.NativeSession(SimpleNamespace(perform=AsyncMock()))
+        session.wait = AsyncMock(return_value=nodes)
+        with self.assertRaisesRegex(NativeDriverError, "无法将简历展开按钮滚入可视区域"):
+            await session.read_resume()
+        self.assertEqual(session.driver.perform.await_args_list, [call(expand, "scrollToVisible")] * 8)
+
     async def test_top_boundary_is_confirmed_when_inherited_up_action_remains(self):
         inherited = node((0,), role="AXGroup", actions=("AXScrollUpByPage", "AXScrollDownByPage"))
         contact = node((9,), "继续沟通", "AXButton", ("AXPress",))

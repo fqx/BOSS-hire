@@ -383,20 +383,82 @@ class NativeSession:
             raise NativeDriverError("简历向上滚动超过 80 页，未确认回到顶部")
 
         nodes = await move_to_top(nodes)
+
+        def expansion_buttons(ns):
+            return [n for n in ns if "AXPress" in n.actions and
+                    re.fullmatch(r"展开(?:全部)?(?:工作经历|项目经历|教育经历)", label(n))]
+
+        def expansion_viewport(ns, button):
+            # Clip the enclosing scroll area to the window. UIKit can keep
+            # offscreen controls in the accessibility tree.
+            frames = [n.rect for n in ns if n.role == "AXWindow" or (
+                n.role == "AXGroup" and len(n.path) < len(button.path)
+                and button.path[:len(n.path)] == n.path
+                and any(a in n.actions for a in ("AXScrollDownByPage", "AXScrollUpByPage"))
+            ) if n.rect["width"] > 0 and n.rect["height"] > 0]
+            if not frames:
+                return None
+            return (max(r["x"] for r in frames), max(r["y"] for r in frames),
+                    min(r["x"] + r["width"] for r in frames),
+                    min(r["y"] + r["height"] for r in frames))
+
         chunks = []
         seen_chunks = set()
         for _ in range(80):
             # These section controls hide actual resume entries. Expand before
             # collecting the page, then resolve all nodes again from a fresh tree.
-            for expansion in range(8):
-                buttons = [n for n in nodes if "AXPress" in n.actions and
-                           re.fullmatch(r"展开(?:全部)?(?:工作经历|项目经历|教育经历)", label(n))]
+            for expansion in range(9):
+                buttons = expansion_buttons(nodes)
                 if not buttons:
                     break
-                await self.driver.perform(buttons[0], "press")
-                nodes = await self.wait(is_resume, "展开完整简历经历", stable_for=0.6)
-            else:
-                raise NativeDriverError("简历经历展开后仍未消失，无法确认完整内容")
+                if expansion == 8:
+                    raise NativeDriverError("简历经历展开后仍未消失，无法确认完整内容")
+                button = buttons[0]
+                target_label = label(button)
+                repositioned = False
+                for positioning in range(9):
+                    viewport = expansion_viewport(nodes, button)
+                    r = button.rect
+                    # AXPress activates the element semantically. Require its
+                    # center inside the viewport, allowing a partially clipped
+                    # edge after page scrolling without bouncing back and forth.
+                    if viewport is None or (r["width"] > 0 and r["height"] > 0
+                            and viewport[0] < r["x"] + r["width"] / 2 < viewport[2]
+                            and viewport[1] < r["y"] + r["height"] / 2 < viewport[3]):
+                        break
+                    if positioning == 8:
+                        raise NativeDriverError(f"无法将简历展开按钮滚入可视区域：{target_label}")
+                    if "AXScrollToVisible" in button.actions:
+                        await self.driver.perform(button, "scrollToVisible")
+                    else:
+                        action = "AXScrollUpByPage" if r["y"] + r["height"] / 2 <= viewport[1] else "AXScrollDownByPage"
+                        scrolls = [n for n in nodes if n.role == "AXGroup" and action in n.actions
+                                   and button.path[:len(n.path)] == n.path]
+                        if not scrolls:
+                            raise NativeDriverError(f"简历展开按钮在可视区域外且无法滚动：{target_label}")
+                        await self.driver.perform(max(scrolls, key=lambda n: len(n.path)), action)
+                    repositioned = True
+                    nodes = await self.wait(is_resume, "滚动到简历展开按钮", stable_for=0.6)
+                    matches = [n for n in expansion_buttons(nodes) if label(n) == target_label]
+                    if len(matches) != 1:
+                        raise NativeDriverError(f"滚动后无法唯一定位简历展开按钮：{target_label}")
+                    button = matches[0]
+                await self.driver.perform(button, "press")
+                try:
+                    nodes = await self.wait(
+                        lambda ns: is_resume(ns) and not any(
+                            label(n) == target_label for n in expansion_buttons(ns)),
+                        "简历展开按钮消失", timeout=3, stable_for=0.6,
+                    )
+                except TimeoutError:
+                    nodes = await self.snapshot()
+                    if not is_resume(nodes):
+                        raise NativeDriverError("展开经历后已离开原简历页面")
+                    logger.warning("简历展开按钮尚未消失，重新定位后继续确认：%s", target_label)
+                if repositioned:
+                    # Positioning may have skipped earlier cells. Restart at the
+                    # top so no resume content is lost during collection.
+                    nodes = await move_to_top(nodes)
 
             scrolls = [n for n in nodes if n.role == "AXGroup" and
                        any(a in n.actions for a in ("AXScrollDownByPage", "AXScrollUpByPage", "AXScrollRightByPage"))]
