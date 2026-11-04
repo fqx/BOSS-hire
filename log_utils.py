@@ -72,7 +72,7 @@ logger.addHandler(tqdm_handler)
 
 # 添加FileHandler用于文件输出
 file_handler = logging.FileHandler('boss_hire.log', encoding='utf-8')
-file_handler.setLevel(logging.WARNING)
+file_handler.setLevel(logging.DEBUG if logger.isEnabledFor(logging.DEBUG) else logging.WARNING)
 file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
