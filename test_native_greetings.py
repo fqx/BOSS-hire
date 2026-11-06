@@ -171,6 +171,45 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         row = node("测试候选人, 您好, 示例学院, 本科", "AXStaticText", path=(1,))
         self.assertEqual(greeting_rows([row]), [row])
 
+    def test_greeting_row_without_education_is_recognized(self):
+        for salary in ("8000-10000元", "1.5-2万元", "9-12K", "面议"):
+            row = node(f"测试候选人, 我有直播经验 发录屏您看下可以嘛, 示例大学, {salary}",
+                       "AXStaticText", path=(1,))
+            with self.subTest(salary=salary):
+                self.assertEqual(greeting_rows([row]), [row])
+
+    def test_greeting_row_requires_metadata_and_pressable_static_text(self):
+        description = "测试候选人, 您好, 示例大学, 8000-10000元"
+        self.assertEqual(greeting_rows([
+            node("测试候选人, 您好, 示例大学, 未验证内容", "AXStaticText"),
+            node(description),
+            replace(node(description, "AXStaticText"), actions=()),
+            node("以上是30天内的联系人", "AXStaticText"),
+        ]), [])
+
+    async def test_unconfirmed_mark_continues_to_row_without_education(self):
+        row = node("测试候选人, 我有直播经验 发录屏您看下可以嘛, 示例大学, 8000-10000元",
+                   "AXStaticText", path=(2,))
+        remaining = LIST[:-1] + [row, node("网络连接失败，请检查网络设置，立即查看")]
+        session = SimpleNamespace(
+            snapshot=AsyncMock(side_effect=[LIST, RESUME, RESUME, remaining, RESUME, RESUME]),
+            wait=AsyncMock(side_effect=[LIST, LIST, CHAT, CHAT]),
+            driver=SimpleNamespace(perform=AsyncMock()),
+            read_resume=AsyncMock(return_value="候选人简历\n主播经验"),
+            back=AsyncMock(side_effect=[CHAT, CHAT, EMPTY]),
+        )
+        rejected = SimpleNamespace(is_qualified=False, reason_category="过往经历不符")
+        stats = {}
+        with patch("native_greetings.llm_utils.is_qualified_text_result", return_value=rejected), \
+             patch("native_greetings.mark_unsuitable", new=AsyncMock(
+                 side_effect=NativeMarkUnconfirmedError("网络连接失败"))) as mark:
+            self.assertEqual(await loop_greetings(session, CONFIGS, None, stats, allow_contact=True), 2)
+        mark.assert_awaited_once()
+        self.assertEqual(session.read_resume.await_count, 2)
+        session.driver.perform.assert_any_await(row, "press")
+        self.assertEqual(stats["私域电商主播"]["mark_unconfirmed_skipped"], 2)
+        self.assertNotIn("marked_unsuitable", stats["私域电商主播"])
+
     async def test_observed_empty_unread_list_finishes_without_opening_conversations(self):
         page = [node("新招呼", "AXStaticText"), node("批量处理"),
                 node("空列表", "AXGroup"), node("暂时还没有消息呢", "AXStaticText")]

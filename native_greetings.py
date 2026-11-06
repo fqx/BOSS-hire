@@ -409,7 +409,8 @@ def greeting_rows(nodes):
     """Recognize observed message rows; the target job exists only in chat."""
     return [n for n in nodes if n.role == "AXStaticText" and "AXPress" in n.actions
             and n.description.count(",") >= 3
-            and re.fullmatch(r"(?:初中及以下|高中|中专/中技|大专|本科|硕士|博士)(?:\s*\|.*)?",
+            and re.fullmatch(r"(?:初中及以下|高中|中专/中技|大专|本科|硕士|博士)(?:\s*\|.*)?"
+                             r"|(?:\d+(?:\.\d+)?\s*-\s*)?\d+(?:\.\d+)?\s*(?:元|万元|[kK千])|面议",
                              n.description.rsplit(",", 1)[-1].strip())]
 
 
