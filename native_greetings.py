@@ -407,11 +407,34 @@ async def mark_unsuitable(session, reason_category, expected_card_description=No
 
 def greeting_rows(nodes):
     """Recognize observed message rows; the target job exists only in chat."""
-    return [n for n in nodes if n.role == "AXStaticText" and "AXPress" in n.actions
-            and n.description.count(",") >= 3
-            and re.fullmatch(r"(?:初中及以下|高中|中专/中技|大专|本科|硕士|博士)(?:\s*\|.*)?"
-                             r"|(?:\d+(?:\.\d+)?\s*-\s*)?\d+(?:\.\d+)?\s*(?:元|万元|[kK千])|面议",
-                             n.description.rsplit(",", 1)[-1].strip())]
+    groups = {n.path: n for n in nodes if n.role == "AXGroup"}
+    child_counts = {}
+    for n in nodes:
+        if n.path:
+            parent_path = n.path[:-1]
+            child_counts[parent_path] = child_counts.get(parent_path, 0) + 1
+    on_list = is_greetings_list(nodes)
+    rows = []
+    for n in nodes:
+        if n.role != "AXStaticText" or "AXPress" not in n.actions:
+            continue
+        name, separator, _ = n.description.partition(",")
+        if not separator or not name.strip():
+            continue
+        # Observed UIKit rows wrap a single pressable text node in a group
+        # with identical bounds. Optional education, salary and summary fields
+        # can disappear; the row structure still identifies the entry.
+        parent = groups.get(n.path[:-1])
+        if (on_list and parent is not None and child_counts[parent.path] == 1
+                and parent.rect == n.rect):
+            rows.append(n)
+        elif n.description.count(",") >= 3 and re.fullmatch(
+            r"(?:初中及以下|高中|中专/中技|大专|本科|硕士|博士)(?:\s*\|.*)?"
+            r"|(?:\d+(?:\.\d+)?\s*-\s*)?\d+(?:\.\d+)?\s*(?:元|万元|[kK千])|面议",
+            n.description.rsplit(",", 1)[-1].strip(),
+        ):
+            rows.append(n)
+    return rows
 
 
 EMPTY_GREETING_LABELS = ("暂无新招呼", "暂无消息", "暂无新消息", "暂时没有新招呼", "暂时还没有消息呢")

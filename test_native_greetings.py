@@ -187,10 +187,47 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
             node("以上是30天内的联系人", "AXStaticText"),
         ]), [])
 
-    async def test_unconfirmed_mark_continues_to_row_without_education(self):
-        row = node("测试候选人, 我有直播经验 发录屏您看下可以嘛, 示例大学, 8000-10000元",
-                   "AXStaticText", path=(2,))
-        remaining = LIST[:-1] + [row, node("网络连接失败，请检查网络设置，立即查看")]
+    def test_structured_greeting_rows_allow_missing_optional_fields(self):
+        descriptions = (
+            "测试候选人, 您好, 示例公司, 本科 | 8000-10000元",
+            "测试候选人, 您好, 示例公司, 本科",
+            "测试候选人, 您好, 示例公司, 8000-10000元",
+            "测试候选人, 您好, 示例公司",
+            "测试候选人, 您好, , ",
+            "测试候选人, , 示例公司, ",
+            "测试候选人, , , ",
+            "测试候选人, 示例公司",
+            "测试候选人, 本科 | 面议",
+        )
+        parent = replace(node("", "AXGroup", path=(9,)), actions=("AXScrollToVisible",))
+        for description in descriptions:
+            row = node(description, "AXStaticText", path=(9, 0))
+            with self.subTest(description=description):
+                self.assertEqual(greeting_rows(LIST[:-1] + [parent, row]), [row])
+
+    def test_missing_metadata_requires_verified_list_and_row_structure(self):
+        parent = replace(node("", "AXGroup", path=(9,)), actions=("AXScrollToVisible",))
+        row = node("测试候选人, 您好, 示例公司", "AXStaticText", path=(9, 0))
+        cases = (
+            [parent, row],
+            LIST[:-1] + [row],
+            LIST[:-1] + [replace(parent, rect={**parent.rect, "height": 100}), row],
+            LIST[:-1] + [parent, row, node("普通提示", "AXStaticText", path=(9, 1))],
+            LIST[:-1] + [parent, replace(row, role="AXButton")],
+            LIST[:-1] + [parent, replace(row, actions=())],
+            LIST[:-1] + [parent, replace(row, description="以上是30天内的联系人")],
+            LIST[:-1] + [parent, replace(row, description=", 您好, 示例公司")],
+            LIST[:-1] + CHAT + [parent, row],
+        )
+        for index, page in enumerate(cases):
+            with self.subTest(case=index):
+                self.assertEqual(greeting_rows(page), [])
+
+    async def test_unconfirmed_mark_continues_to_row_without_education_or_salary(self):
+        row = node("测试候选人, 我有直播经验 发录屏您看下可以嘛, 示例大学",
+                   "AXStaticText", path=(9, 0))
+        parent = replace(node("", "AXGroup", path=(9,)), actions=("AXScrollToVisible",))
+        remaining = LIST[:-1] + [parent, row, node("网络连接失败，请检查网络设置，立即查看")]
         session = SimpleNamespace(
             snapshot=AsyncMock(side_effect=[LIST, RESUME, RESUME, remaining, RESUME, RESUME]),
             wait=AsyncMock(side_effect=[LIST, LIST, CHAT, CHAT]),
