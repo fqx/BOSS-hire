@@ -578,6 +578,67 @@ class NativeSessionTests(unittest.IsolatedAsyncioTestCase):
         session.snapshot.assert_awaited_once_with(allow_network_error=True)
         self.assertTrue(session.back.await_args.kwargs["allow_network_error"])
 
+    async def test_return_to_candidates_unwinds_previous_chat_before_resume(self):
+        current_chat = self.back_page("当前候选人") + [node((2,), "求简历"), node((3,), "换电话/微信")]
+        previous_chat = self.back_page("上一段会话") + [node((2,), "求简历"), node((3,), "换电话/微信")]
+        resume = self.back_page("下层简历") + [node((2,), "求职期望"), node((3,), "工作经历")]
+        listed = [node((0,), "牛人"), node((1,), "推荐")]
+        pages = [current_chat, previous_chat, resume, listed]
+        position = 0
+        elapsed = 0.0
+
+        async def perform(control, action):
+            nonlocal position
+            self.assertEqual((control, action), (pages[position][1], "press"))
+            position += 1
+
+        async def sleep(delay):
+            nonlocal elapsed
+            elapsed += delay
+
+        driver = SimpleNamespace(snapshot=AsyncMock(side_effect=lambda: pages[position]),
+                                 perform=AsyncMock(side_effect=perform))
+        with patch("native_workflow.time.monotonic", side_effect=lambda: elapsed), \
+             patch("native_workflow.asyncio.sleep", side_effect=sleep), \
+             patch("native_workflow.jitter", return_value=0.2):
+            result = await native_workflow.NativeSession(driver).return_to_candidates(allow_network_error=True)
+        self.assertEqual(result, listed)
+        self.assertEqual(driver.perform.await_count, 3)
+
+    async def test_return_to_candidates_does_not_accept_unchanged_chat_as_transition(self):
+        chat = self.back_page() + [node((2,), "求简历"), node((3,), "换电话/微信")]
+        elapsed = 0.0
+
+        async def sleep(delay):
+            nonlocal elapsed
+            elapsed += delay
+
+        driver = SimpleNamespace(snapshot=AsyncMock(return_value=chat), perform=AsyncMock())
+        with patch("native_workflow.time.monotonic", side_effect=lambda: elapsed), \
+             patch("native_workflow.asyncio.sleep", side_effect=sleep), \
+             patch("native_workflow.jitter", return_value=0.2):
+            with self.assertRaisesRegex(TimeoutError, "简历、会话或候选人列表"):
+                await native_workflow.NativeSession(driver).return_to_candidates(allow_network_error=True)
+        self.assertEqual(driver.perform.await_count, 2)
+
+    async def test_return_to_candidates_stops_after_unknown_transition(self):
+        chat = self.back_page() + [node((2,), "求简历"), node((3,), "换电话/微信")]
+        unknown = self.back_page("未知页面")
+        elapsed = 0.0
+        driver = SimpleNamespace(perform=AsyncMock())
+        driver.snapshot = AsyncMock(side_effect=lambda: unknown if driver.perform.await_count else chat)
+
+        async def sleep(delay):
+            nonlocal elapsed
+            elapsed += delay
+
+        with patch("native_workflow.time.monotonic", side_effect=lambda: elapsed), \
+             patch("native_workflow.asyncio.sleep", side_effect=sleep), \
+             patch("native_workflow.jitter", return_value=0.2):
+            with self.assertRaisesRegex(TimeoutError, "简历、会话或候选人列表"):
+                await native_workflow.NativeSession(driver).return_to_candidates(allow_network_error=True)
+        driver.perform.assert_awaited_once_with(chat[1], "press")
+
     async def test_select_job_requires_unique_exact_native_label(self):
         base = [node((0,), "牛人", "AXButton"), node((1,), "推荐", "AXButton")]
         for jobs in (

@@ -222,28 +222,35 @@ class NativeSession:
     async def return_to_candidates(self, *, allow_network_error=False):
         navigation_options = {"allow_network_error": True} if allow_network_error else {}
         nodes = await self.snapshot(**navigation_options)
+        # Opening recommendation chats can leave an earlier conversation above
+        # the resume. Unwind both chats and the resume, checking each transition.
+        for _ in range(3):
+            if is_candidate_list(nodes):
+                return nodes
+            if not is_resume(nodes) and not has_label(nodes, "求简历"):
+                # A persistent connection banner can replace the detail tree with
+                # a list root. Recovery is navigation-only: use the 牛人 tab or one
+                # leading back arrow, then require the candidate list.
+                tabs = [n for n in nodes if n.role == "AXButton" and label(n) == "牛人"
+                        and "AXPress" in n.actions]
+                if allow_network_error and len(tabs) == 1:
+                    await self.driver.perform(tabs[0], "press")
+                    return await self.wait(is_candidate_list, "候选人列表", **navigation_options)
+                if allow_network_error:
+                    try:
+                        return await self.back(is_candidate_list, "候选人列表", **navigation_options)
+                    except NativeDriverError:
+                        pass
+                raise NativeDriverError("当前不是简历或会话页面，无法返回候选人列表")
+            original_page = page_identity(nodes)
+            nodes = await self.back(
+                lambda ns: is_candidate_list(ns) or (
+                    (is_resume(ns) or has_label(ns, "求简历")) and page_identity(ns) != original_page
+                ), "简历、会话或候选人列表", **navigation_options,
+            )
         if is_candidate_list(nodes):
             return nodes
-        if not is_resume(nodes) and not has_label(nodes, "求简历"):
-            # A persistent connection banner can replace the detail tree with
-            # a list root. Recovery is navigation-only: use the 牛人 tab or one
-            # leading back arrow, then require the candidate list.
-            tabs = [n for n in nodes if n.role == "AXButton" and label(n) == "牛人"
-                    and "AXPress" in n.actions]
-            if allow_network_error and len(tabs) == 1:
-                await self.driver.perform(tabs[0], "press")
-                return await self.wait(is_candidate_list, "候选人列表", **navigation_options)
-            if allow_network_error:
-                try:
-                    return await self.back(is_candidate_list, "候选人列表", **navigation_options)
-                except NativeDriverError:
-                    pass
-            raise NativeDriverError("当前不是简历或会话页面，无法返回候选人列表")
-        nodes = await self.back(lambda ns: is_resume(ns) or is_candidate_list(ns),
-                                "简历或候选人列表", **navigation_options)
-        if is_candidate_list(nodes):
-            return nodes
-        return await self.back(is_candidate_list, "候选人列表", **navigation_options)
+        raise NativeDriverError("返回超过三层页面后仍未到候选人列表，停止处理")
 
     async def select_job(self, job_title, selector_job_title=None):
         # Message delivery can be offline while recommendations remain usable.
