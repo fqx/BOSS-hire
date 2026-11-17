@@ -47,7 +47,93 @@ GENERATED_MESSAGE = "您好，看到您有直播带货和健康产品讲解经�
 
 
 class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_mark_failures_skip_later_marks_but_preserve_qualified_replies(self):
+    async def test_chat_history_scrolls_up_to_find_virtualized_resume_card(self):
+        history = replace(node("", "AXGroup", path=(0, 8)), actions=("AXScrollUpByPage",))
+        bottom = CHAT[:-1] + [history, node("长视频履历消息", "AXStaticText", path=(0, 8, 1, 0))]
+        session = SimpleNamespace(
+            snapshot=AsyncMock(return_value=LIST),
+            wait=AsyncMock(side_effect=[LIST, LIST, bottom, CHAT]),
+            driver=SimpleNamespace(perform=AsyncMock()),
+            read_resume=AsyncMock(return_value="候选人完整简历"),
+            back=AsyncMock(side_effect=[CHAT, EMPTY]),
+        )
+        with patch("native_greetings.llm_utils.is_qualified_text_result", return_value=None):
+            self.assertEqual(await loop_greetings(session, CONFIGS, None, {}, allow_contact=False), 1)
+        self.assertIn((history, "scrollUp"), [call.args for call in session.driver.perform.await_args_list])
+        session.read_resume.assert_awaited_once()
+
+    async def test_chat_without_resume_card_stops_at_top_without_opening_detail(self):
+        history = replace(node("", "AXGroup", path=(0, 8)), actions=("AXScrollUpByPage",))
+        page = CHAT[:-1] + [history]
+        session = SimpleNamespace(
+            snapshot=AsyncMock(return_value=LIST),
+            wait=AsyncMock(side_effect=[LIST, LIST, page, page]),
+            driver=SimpleNamespace(perform=AsyncMock()), read_resume=AsyncMock(),
+        )
+        with self.assertRaisesRegex(NativeDriverError, "无法唯一识别"):
+            await loop_greetings(session, CONFIGS, None, {}, allow_contact=False)
+        self.assertEqual(sum(call.args == (history, "scrollUp")
+                             for call in session.driver.perform.await_args_list), 1)
+        session.read_resume.assert_not_awaited()
+
+    async def test_mark_confirms_return_to_list_with_stale_network_banner_without_resubmitting(self):
+        from native_workflow import NativeSession
+        from native_greetings import is_greetings_list
+
+        elapsed = 0.0
+        pressed = False
+        banner = node("网络连接失败，请检查网络")
+
+        async def snapshot():
+            if not pressed:
+                return REASON_PANEL
+            return EMPTY + [banner]
+
+        async def perform(control, action):
+            nonlocal pressed
+            self.assertEqual((control, action), (REASON, "press"))
+            pressed = True
+
+        async def sleep(delay):
+            nonlocal elapsed
+            elapsed += delay
+
+        driver = SimpleNamespace(snapshot=AsyncMock(side_effect=snapshot),
+                                 perform=AsyncMock(side_effect=perform))
+        with patch("native_workflow.time.monotonic", side_effect=lambda: elapsed), \
+             patch("native_workflow.asyncio.sleep", side_effect=sleep), \
+             patch("native_workflow.exponential_backoff", return_value=4.0), \
+             patch("native_workflow.jitter", return_value=0.2):
+            await mark_unsuitable(NativeSession(driver), "过往经历不符", CARD.description,
+                                  success_check=is_greetings_list)
+        driver.perform.assert_awaited_once_with(REASON, "press")
+        self.assertLess(elapsed, 2)
+
+    async def test_mark_persistent_network_banner_stops_without_resubmitting(self):
+        from native_workflow import NativeSession
+        from native_greetings import is_greetings_list
+
+        elapsed = 0.0
+        driver = SimpleNamespace(
+            snapshot=AsyncMock(side_effect=lambda: REASON_PANEL if not driver.perform.await_count
+                               else REASON_CONFIRM + [node("网络连接失败，请检查网络")]),
+            perform=AsyncMock(),
+        )
+
+        async def sleep(delay):
+            nonlocal elapsed
+            elapsed += delay
+
+        with patch("native_workflow.time.monotonic", side_effect=lambda: elapsed), \
+             patch("native_workflow.asyncio.sleep", side_effect=sleep), \
+             patch("native_workflow.exponential_backoff", return_value=4.0):
+            with self.assertRaisesRegex(NativeMarkUnconfirmedError, "网络连接失败"):
+                await mark_unsuitable(NativeSession(driver), "过往经历不符", CARD.description,
+                                      success_check=is_greetings_list)
+        self.assertEqual(elapsed, 10)
+        driver.perform.assert_awaited_once_with(REASON, "press")
+
+    async def test_mark_quota_skips_later_marks_but_preserves_qualified_replies(self):
         row_b = replace(LIST[-1], description="赖女士, 应聘主播, 药业公司-主播, 大专 | 9000-10000元")
         both = LIST + [row_b]
         cases = [
@@ -55,7 +141,6 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
             for qualified in (False, True)
             for error, flag, counter in (
                 (NativeMarkLimitError("标记额度已满"), "greeting_mark_limit_reached", "mark_limit_skipped"),
-                (NativeMarkUnconfirmedError("标记结果未确认"), "greeting_mark_result_unknown", "mark_unconfirmed_skipped"),
             )
         ]
         for second_qualified, error, flag, counter in cases:
@@ -81,6 +166,29 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["私域电商主播"][counter], 1 if second_qualified else 2)
             self.assertNotIn("marked_unsuitable", stats["私域电商主播"])
             self.assertEqual(send.await_count, int(second_qualified))
+
+    async def test_unconfirmed_mark_stops_before_next_candidate(self):
+        row_b = replace(LIST[-1], description="赖女士, 应聘主播, 药业公司-主播, 大专 | 9000-10000元")
+        both = LIST + [row_b]
+        session = SimpleNamespace(
+            snapshot=AsyncMock(side_effect=[both, RESUME, RESUME, CHAT, RESUME, RESUME]),
+            wait=AsyncMock(side_effect=[both, both, CHAT, CHAT]),
+            driver=SimpleNamespace(perform=AsyncMock()),
+            read_resume=AsyncMock(return_value="候选人简历\n主播经验"),
+            back=AsyncMock(side_effect=[CHAT, both, CHAT, EMPTY]),
+        )
+        result = SimpleNamespace(is_qualified=False, reason_category="过往经历不符")
+        stats = {}
+        with patch("native_greetings.llm_utils.is_qualified_text_result", return_value=result), \
+             patch("native_greetings.mark_unsuitable", new=AsyncMock(side_effect=NativeMarkUnconfirmedError("标记结果未确认"))) as mark, \
+             patch("native_greetings.send_saved_greeting", new=AsyncMock()) as send:
+            with self.assertRaisesRegex(NativeMarkUnconfirmedError, "标记结果未确认"):
+                await loop_greetings(session, CONFIGS, None, stats, allow_contact=True)
+        mark.assert_awaited_once()
+        send.assert_not_awaited()
+        session.read_resume.assert_awaited_once()
+        session.back.assert_awaited_once()
+        self.assertNotIn("marked_unsuitable", stats["私域电商主播"])
 
     async def test_mark_quota_already_returned_to_list_does_not_press_back_again(self):
         session = SimpleNamespace(
@@ -223,7 +331,7 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(case=index):
                 self.assertEqual(greeting_rows(page), [])
 
-    async def test_unconfirmed_mark_continues_to_row_without_education_or_salary(self):
+    async def test_unconfirmed_mark_stops_before_row_without_education_or_salary(self):
         row = node("测试候选人, 我有直播经验 发录屏您看下可以嘛, 示例大学",
                    "AXStaticText", path=(9, 0))
         parent = replace(node("", "AXGroup", path=(9,)), actions=("AXScrollToVisible",))
@@ -240,11 +348,11 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         with patch("native_greetings.llm_utils.is_qualified_text_result", return_value=rejected), \
              patch("native_greetings.mark_unsuitable", new=AsyncMock(
                  side_effect=NativeMarkUnconfirmedError("网络连接失败"))) as mark:
-            self.assertEqual(await loop_greetings(session, CONFIGS, None, stats, allow_contact=True), 2)
+            with self.assertRaisesRegex(NativeMarkUnconfirmedError, "网络连接失败"):
+                await loop_greetings(session, CONFIGS, None, stats, allow_contact=True)
         mark.assert_awaited_once()
-        self.assertEqual(session.read_resume.await_count, 2)
-        session.driver.perform.assert_any_await(row, "press")
-        self.assertEqual(stats["私域电商主播"]["mark_unconfirmed_skipped"], 2)
+        session.read_resume.assert_awaited_once()
+        self.assertNotIn((row, "press"), [call.args for call in session.driver.perform.await_args_list])
         self.assertNotIn("marked_unsuitable", stats["私域电商主播"])
 
     async def test_observed_empty_unread_list_finishes_without_opening_conversations(self):
@@ -471,7 +579,7 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
                          [(reason_node, "press"), (confirm_node, "press")])
 
     async def test_mark_unconfirmed_submission_stops_without_retry(self):
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             if "原因选择" in description:
                 self.assertTrue(predicate(REASON_CONFIRM))
                 return REASON_CONFIRM
@@ -492,7 +600,7 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         )
         changed = MARKED.copy()
         changed[2] = replace(CARD, description="另一人，沟通的职位-私域电商主播")
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             page = REASON_CONFIRM if "原因选择" in description else changed
             self.assertTrue(predicate(page))
             return page
@@ -502,7 +610,7 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.driver.perform.await_count, 2)
 
     async def test_enabled_unqualified_flow_counts_only_confirmed_mark(self):
-        for error, landed_on_list in ((None, False), (None, True), (NativeMarkUnconfirmedError("not confirmed"), False)):
+        for error, landed_on_list in ((None, False), (None, True)):
             with self.subTest(error=error, landed_on_list=landed_on_list):
                 post_mark = EMPTY if landed_on_list else CHAT
                 session = SimpleNamespace(
@@ -522,9 +630,6 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(set(mark.await_args.kwargs), {"verify_page", "success_check"})
                 self.assertEqual(stats["私域电商主播"].get("marked_unsuitable", 0), 1 if error is None else 0)
                 self.assertEqual(session.back.await_count, 1 if landed_on_list else 2)
-                if error is not None:
-                    self.assertTrue(session.greeting_mark_result_unknown)
-                    self.assertEqual(stats["私域电商主播"]["mark_unconfirmed_skipped"], 1)
 
     async def test_unqualified_default_marks_and_review_decision_can_queue(self):
         for decision, marks in ((None, True), (True, True), (False, False), ("yes", False)):
@@ -697,7 +802,7 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         field = node("", "AXTextArea", path=(0, 9, 0))
         written = CHAT + [replace(field, value=GENERATED_MESSAGE)]
         sent = CHAT + [field, node(GENERATED_MESSAGE, "AXStaticText", path=(0, 8, 2, 1))]
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             page = written if "写入" in description else sent
             self.assertTrue(predicate(page))
             return page
@@ -715,7 +820,7 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
     async def test_generic_editor_uses_verified_typing_with_expected_chat_card(self):
         editor = node("和Ta聊一聊~", "AXGenericElement", path=(0, 9, 0))
         sent = CHAT + [editor, node(GENERATED_MESSAGE, "AXStaticText", path=(0, 8, 2, 1))]
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             self.assertTrue(predicate(sent))
             return sent
         session = SimpleNamespace(
@@ -776,7 +881,7 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         field = node("", "AXTextArea", path=(0, 9, 0))
         written = CHAT + [replace(field, value=GENERATED_MESSAGE),
                           node(GENERATED_MESSAGE, "AXStaticText", path=(0, 9, 1))]
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             if "写入" in description:
                 self.assertTrue(predicate(written))
                 return written
@@ -795,7 +900,7 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
         editor = node("和Ta聊一聊~", "AXGenericElement", path=(0, 9, 0))
         changed = CHAT[:-1] + [replace(CARD, description="另一人，沟通的职位-私域电商主播"),
                               node(GENERATED_MESSAGE, "AXStaticText", path=(0, 8, 2, 1))]
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             predicate(changed)
             self.fail("a changed conversation cannot confirm this send")
         session = SimpleNamespace(
@@ -888,7 +993,7 @@ class SavedGreetingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_opens_panel_and_uses_only_exact_rows_adjacent_send_button(self):
         session = self.session([CHAT + [SAVED_ENTRY], SAVED_PANEL])
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             page = SAVED_PANEL if "面板" in description else SAVED_SENT
             self.assertTrue(predicate(page))
             return page
@@ -910,7 +1015,7 @@ class SavedGreetingTests(unittest.IsolatedAsyncioTestCase):
         old_message = node(SAVED_GREETING_MSG, "AXStaticText", path=(0, 8, 2, 1))
         panel = SAVED_PANEL + [old_message]
         session = self.session([panel, panel])
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             self.assertFalse(predicate(panel))
             sent = SAVED_SENT + [node(SAVED_GREETING_MSG, "AXStaticText", path=(0, 8, 3, 1))]
             self.assertTrue(predicate(sent))
@@ -950,7 +1055,7 @@ class SavedGreetingTests(unittest.IsolatedAsyncioTestCase):
         changed = [replace(n, description="另一位候选人，沟通的职位-私域电商主播") if n == CARD else n
                    for n in SAVED_PANEL]
         session = self.session([CHAT + [SAVED_ENTRY]])
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             predicate(changed)
         session.wait = AsyncMock(side_effect=wait)
         with self.assertRaisesRegex(NativeDriverError, "会话候选人发生变化"):
@@ -960,7 +1065,7 @@ class SavedGreetingTests(unittest.IsolatedAsyncioTestCase):
     async def test_unconfirmed_send_stops_without_retry_and_draft_cannot_confirm(self):
         session = self.session([SAVED_PANEL, SAVED_PANEL])
         draft_only = CHAT + [node(SAVED_GREETING_MSG, "AXStaticText", path=(0, 9, 1))]
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             self.assertFalse(predicate(SAVED_PANEL))
             self.assertFalse(predicate(draft_only))
             raise TimeoutError("sent history not confirmed")
@@ -974,7 +1079,7 @@ class SavedGreetingTests(unittest.IsolatedAsyncioTestCase):
         session = self.session([SAVED_PANEL, SAVED_PANEL])
         changed = [replace(n, description="另一位候选人，沟通的职位-私域电商主播") if n == CARD else n
                    for n in SAVED_SENT]
-        async def wait(predicate, description):
+        async def wait(predicate, description, **kwargs):
             predicate(changed)
         session.wait = AsyncMock(side_effect=wait)
         with self.assertRaisesRegex(NativeDriverError, "会话候选人发生变化"):

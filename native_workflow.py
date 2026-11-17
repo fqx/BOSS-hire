@@ -127,7 +127,8 @@ class NativeSession:
             await asyncio.sleep(jitter(0.2))
         raise TimeoutError("关闭购买页后未确认返回客户端原页面")
 
-    async def wait(self, predicate, description, timeout=15, stable_for=0.5, *, allow_network_error=False):
+    async def wait(self, predicate, description, timeout=15, stable_for=0.5, *,
+                   allow_network_error=False, network_success_check=None):
         deadline = time.monotonic() + timeout
         previous = None
         stable_since = None
@@ -136,7 +137,13 @@ class NativeSession:
         network_warned = False
         while time.monotonic() < deadline:
             try:
-                nodes = await self.snapshot(allow_network_error=allow_network_error)
+                nodes = await self.snapshot(
+                    allow_network_error=allow_network_error or network_success_check is not None,
+                )
+                if (not allow_network_error and network_success_check is not None
+                        and any(n.role == "AXButton" and label(n).startswith("网络连接失败") for n in nodes)
+                        and not network_success_check(nodes)):
+                    raise NativeNetworkError("BOSS 网络连接失败，请先恢复客户端网络")
             except NativeNetworkError:
                 # A banner can appear briefly right after a transition. Waiting
                 # it out is safe because this loop never repeats a write; a
@@ -158,7 +165,7 @@ class NativeSession:
                 await asyncio.sleep(delay)
                 continue
             if network_warned:
-                logger.info("网络连接失败横幅已消失，继续等待页面")
+                logger.info("网络异常等待结束，继续核对页面状态")
                 network_warned = False
             network_deadline = None
             network_attempt = 0

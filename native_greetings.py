@@ -371,7 +371,7 @@ async def mark_unsuitable(session, reason_category, expected_card_description=No
 
     async def wait_for_mark_result(predicate, description):
         try:
-            return await session.wait(predicate, description)
+            return await session.wait(predicate, description, network_success_check=submitted)
         except (TimeoutError, NativeNetworkError) as error:
             raise NativeMarkUnconfirmedError(
                 f"标记不合适结果未确认（可能额度已满或网络异常），不重复提交：{error}"
@@ -563,6 +563,21 @@ async def loop_greetings(session, job_configs, client, job_stats,
             await session.driver.perform(row, "press")
             chat_nodes = await session.wait(is_chat, "新招呼会话")
             progress.update(1)
+            for _ in range(80):
+                if any("沟通的职位-" in n.description and "AXPress" in n.actions for n in chat_nodes):
+                    break
+                # Long image/video messages can virtualize the resume card out
+                # of the current history. Read earlier pages before binding it.
+                scrolls = [n for n in chat_nodes if n.role == "AXGroup" and "AXScrollUpByPage" in n.actions]
+                if not scrolls:
+                    break
+                before = tuple((n.path, n.role, label(n), round(n.rect["y"], 1)) for n in chat_nodes)
+                await session.driver.perform(min(scrolls, key=lambda n: len(n.path)), "scrollUp")
+                chat_nodes = await session.wait(is_chat, "上翻会话查找简历卡片", stable_for=0.6)
+                if tuple((n.path, n.role, label(n), round(n.rect["y"], 1)) for n in chat_nodes) == before:
+                    break
+            else:
+                raise NativeDriverError("会话历史向上翻页超过80页，未找到简历卡片")
             actual_title, card = chat_position(chat_nodes)
             config = match_greeting_job(actual_title, job_configs)
             if config is None:
@@ -598,6 +613,11 @@ async def loop_greetings(session, job_configs, client, job_stats,
             if allow_contact:
                 current = await session.snapshot()
                 if not is_resume(current) or page_identity(current) != assessed_page:
+                    current_page = page_identity(current)
+                    logger.llm(
+                        f"新招呼评估后简历页面变化；消失节点：{tuple(n for n in assessed_page if n not in current_page)!r}；"
+                        f"新增节点：{tuple(n for n in current_page if n not in assessed_page)!r}"
+                    )
                     raise NativeDriverError("评估期间新招呼简历或候选人发生变化，停止处理")
             await session.back(is_chat, "关闭新招呼在线简历")
             logger.info("新招呼[%s / %s]：关闭详情，已返回会话", actual_title, candidate_label)
@@ -620,9 +640,6 @@ async def loop_greetings(session, job_configs, client, job_stats,
             elif allow_contact and getattr(session, "greeting_mark_limit_reached", False):
                 counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
                 logger.warning("BOSS 标记不合适额度已满，跳过当前候选人标记，继续处理新招呼")
-            elif allow_contact and getattr(session, "greeting_mark_result_unknown", False):
-                counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
-                logger.warning("本轮新招呼标记因先前结果未确认而暂停，跳过标记并继续处理")
             elif allow_contact:
                 # 默认按模型结论自动标记；显式开启复核时逐人确认，未获确认的结论保留待复核。
                 approved = True
@@ -651,11 +668,6 @@ async def loop_greetings(session, job_configs, client, job_stats,
                         mark_limited_now = True
                         counters["mark_limit_skipped"] = counters.get("mark_limit_skipped", 0) + 1
                         logger.warning("%s；当前候选人未标记，本轮跳过后续标记，继续处理新招呼", error)
-                    except NativeMarkUnconfirmedError as error:
-                        session.greeting_mark_result_unknown = True
-                        mark_limited_now = True
-                        counters["mark_unconfirmed_skipped"] = counters.get("mark_unconfirmed_skipped", 0) + 1
-                        logger.warning("%s；跳过当前标记，本轮暂停后续新招呼标记，继续处理", error)
                     else:
                         marked_now = True
                         counters["marked_unsuitable"] = counters.get("marked_unsuitable", 0) + 1
