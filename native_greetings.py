@@ -499,6 +499,17 @@ async def select_unread_greetings(session, nodes):
     return nodes
 
 
+def _greeting_resume_identity(nodes):
+    from native_workflow import page_identity
+
+    # A new attachment request can appear above the resume while the model is running.
+    return tuple(
+        (path, role, text) for path, role, text in page_identity(nodes)
+        if not (path == (0, 1, 1) and role == "AXButton"
+                and text.endswith("，请求发简历，我想要发送附件简历到您的邮箱，您是否同意"))
+    )
+
+
 async def loop_greetings(session, job_configs, client, job_stats,
                          allow_contact=False, max_candidates=200, rejection_reviewer=None):
     """Read new greetings and evaluate resumes without contacting by default.
@@ -506,7 +517,7 @@ async def loop_greetings(session, job_configs, client, job_stats,
     Contact actions require explicit opt-in. Rejection must expose the selected
     reason, confirmation control and explicit same-person success state.
     """
-    from native_workflow import has_label, is_candidate_list, is_resume, label, page_identity
+    from native_workflow import has_label, is_candidate_list, is_resume, label
 
     def is_chat(ns):
         return has_label(ns, "求简历") and has_label(ns, "换电话/微信")
@@ -606,14 +617,14 @@ async def loop_greetings(session, job_configs, client, job_stats,
                 logger.warning("新招呼简历读取遇到网络横幅，已确认返回列表，跳过当前候选人")
                 continue
             logger.info("新招呼[%s / %s]：详细简历读取完成，共 %s 字", actual_title, candidate_label, len(text))
-            assessed_page = page_identity(await session.snapshot()) if allow_contact else None
+            assessed_page = _greeting_resume_identity(await session.snapshot()) if allow_contact else None
             result = await asyncio.to_thread(
                 llm_utils.is_qualified_text_result, client, text, requirements["cv_requirements"]
             )
             if allow_contact:
                 current = await session.snapshot()
-                if not is_resume(current) or page_identity(current) != assessed_page:
-                    current_page = page_identity(current)
+                current_page = _greeting_resume_identity(current)
+                if not is_resume(current) or current_page != assessed_page:
                     logger.llm(
                         f"新招呼评估后简历页面变化；消失节点：{tuple(n for n in assessed_page if n not in current_page)!r}；"
                         f"新增节点：{tuple(n for n in current_page if n not in assessed_page)!r}"

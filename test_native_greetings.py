@@ -917,8 +917,33 @@ class NativeGreetingTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(message=message), self.assertRaisesRegex(NativeDriverError, "单行文本"):
                 await send_qualified_message(None, message)
 
+    async def test_attachment_request_banner_does_not_interrupt_assessed_resume(self):
+        request = node(
+            "测试候选人·私域电商主播，请求发简历，我想要发送附件简历到您的邮箱，您是否同意",
+            path=(0, 1, 1),
+        )
+        for before, after in ((RESUME, RESUME + [request]), (RESUME + [request], RESUME)):
+            with self.subTest(banner_appeared=len(after) > len(before)):
+                session = SimpleNamespace(
+                    driver=SimpleNamespace(perform=AsyncMock()),
+                    snapshot=AsyncMock(side_effect=[LIST, before, after, CHAT]),
+                    wait=AsyncMock(side_effect=[LIST, LIST, CHAT]),
+                    read_resume=AsyncMock(return_value="测试简历"),
+                    back=AsyncMock(side_effect=[CHAT, EMPTY]),
+                )
+                stats = {}
+                with patch("native_greetings.llm_utils.is_qualified_text_result",
+                           return_value=SimpleNamespace(is_qualified=True)), \
+                     patch("native_greetings.send_saved_greeting", AsyncMock()) as send:
+                    await loop_greetings(session, CONFIGS, None, stats, allow_contact=True)
+                send.assert_awaited_once_with(session)
+                self.assertEqual(stats[CONFIGS[0]["job_title"]]["requested"], 1)
+
     async def test_changed_resume_after_assessment_stops_before_back_or_send(self):
-        changed_resume = [replace(RESUME[0], description="另一位候选人")] + RESUME[1:]
+        changed_resume = [replace(RESUME[0], description="另一位候选人")] + RESUME[1:] + [
+            node("测试候选人·私域电商主播，请求发简历，我想要发送附件简历到您的邮箱，您是否同意",
+                 path=(0, 1, 1)),
+        ]
         session = SimpleNamespace(
             driver=SimpleNamespace(perform=AsyncMock(), set_value=AsyncMock()),
             snapshot=AsyncMock(side_effect=[LIST, RESUME, changed_resume]),
